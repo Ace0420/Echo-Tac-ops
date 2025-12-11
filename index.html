@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Echo: Tactical Ops</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0a0a0a;
+        }
+        #micButton {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #1a1a1a;
+            border: none;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        #micButton:active {
+            background: #2a2a2a;
+        }
+        .listening {
+            background: #1a3a1a !important;
+        }
+        .start-button {
+            background: #1a1a2a !important;
+        }
+        #textDisplay {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="textDisplay" role="status" aria-live="polite"></div>
+    <button id="micButton" class="start-button" aria-label="Voice command button - Tap to speak"></button>
+
+    <script>
+        const micButton = document.getElementById('micButton');
+        const textDisplay = document.getElementById('textDisplay');
+
+        function displayText(text) {
+            textDisplay.innerHTML = text;
+        }
+
+        let browserSupport = {
+            speechSynthesis: false,
+            speechRecognition: false,
+            https: false
+        };
+
+        function checkBrowserSupport() {
+            // Check if we're in Claude artifact viewer or actual HTTPS
+            const isClaudeArtifact = window.location.href.includes('claude.ai') || 
+                                      window.location.href.includes('anthropic') ||
+                                      window.location.protocol === 'https:' || 
+                                      window.location.hostname === 'localhost';
+            browserSupport.https = isClaudeArtifact;
+            browserSupport.speechSynthesis = !!(window.speechSynthesis && window.SpeechSynthesisUtterance);
+            browserSupport.speechRecognition = !!(window.webkitSpeechRecognition || window.SpeechRecognition);
+        }
+
+        const game = {
+            player: {
+                health: 100,
+                maxHealth: 100,
+                ammo: 30,
+                maxAmmo: 30,
+                grenades: 2,
+                medkits: 1,
+                position: 'approach'
+            },
+            mission: {
+                name: 'Compound Breach',
+                objective: 'Neutralize hostiles and secure the compound',
+                phase: 'approach',
+                enemiesRemaining: 3,
+                alertLevel: 'unaware'
+            },
+            combat: null,
+            listening: false,
+            started: false,
+            initialized: false,
+            phase: 'init'
+        };
+
+        const scenarios = {
+            approach: {
+                description: 'You crouch in the darkness outside a militant compound. Moonlight gleams off corrugated metal roofs. Two sentries patrol the perimeter fence, their silhouettes visible against flickering oil drum fires. Intel says three more hostiles are inside the main structure. Your weapon is loaded. Your radio crackles softly.',
+                choices: 'You can breach the front gate with force, take out the sentries quietly, or find another way in. What are your orders?'
+            },
+            stealthKill: {
+                success: 'You move like smoke through the shadows. The first sentry never sees you coming. Your blade finds its mark, silent and efficient. You drag the body into darkness. One down. The second guard is twenty meters away, oblivious.',
+                failure: 'You lunge from cover but your boot catches loose gravel. The sharp crunch echoes. The sentry spins, raising his AK. Muzzle flash erupts in the darkness.',
+                choices: 'The second sentry is alerted. Engage or retreat to cover?'
+            },
+            breach: {
+                description: 'You stack up at the compound gate, weapon at the ready. Your heart hammers. On your mark. Three. Two. One. You kick the gate open with explosive force. It crashes inward. Shouting erupts from inside. You are committed now.',
+                choices: 'Enemies are scrambling. Push forward aggressively or advance tactically with covering fire?'
+            },
+            combat: {
+                contact: 'Hostiles have engaged! Incoming fire!',
+                suppressed: 'You hear rounds snapping over your head. Dirt and concrete chips spray around you.',
+                reload: 'Magazine empty. You drop it and slam a fresh one home.',
+                hit: 'A round catches your vest. The impact steals your breath.',
+                kill: 'Your shots find their mark. The hostile drops.'
+            }
+        };
+
+        function speak(text, callback) {
+            displayText(text);
+            if (!browserSupport.speechSynthesis) {
+                if (callback) setTimeout(callback, 2000);
+                return;
+            }
+            try {
+                speechSynthesis.cancel();
+                setTimeout(() => {
+                    const utterance = new SpeechSynthesisUtterance(text.replace(/<[^>]*>/g, ''));
+                    utterance.rate = 0.9;
+                    utterance.pitch = 0.95;
+                    if (callback) {
+                        utterance.onend = callback;
+                        utterance.onerror = callback;
+                    }
+                    speechSynthesis.speak(utterance);
+                }, 100);
+            } catch (error) {
+                if (callback) setTimeout(callback, 2000);
+            }
+        }
+
+        function speakSequence(messages, callback) {
+            if (messages.length === 0) {
+                if (callback) callback();
+                return;
+            }
+            const [first, ...rest] = messages;
+            speak(first, () => {
+                if (rest.length > 0) {
+                    setTimeout(() => speakSequence(rest, callback), 700);
+                } else if (callback) {
+                    callback();
+                }
+            });
+        }
+
+        let recognition = null;
+
+        function startListening() {
+            if (!browserSupport.speechRecognition || !browserSupport.https) {
+                speak('Voice recognition requires HTTPS and a compatible browser like Chrome or Edge.');
+                return;
+            }
+            if (game.listening) { stopListening(); return; }
+            try {
+                const Recognition = window.webkitSpeechRecognition || window.SpeechRecognition;
+                recognition = new Recognition();
+                recognition.continuous = false;
+                recognition.lang = 'en-US';
+                recognition.onstart = () => {
+                    game.listening = true;
+                    micButton.classList.add('listening');
+                };
+                recognition.onresult = (event) => {
+                    const command = event.results[0][0].transcript.toLowerCase().trim();
+                    displayText(`You said: "${command}"`);
+                    stopListening();
+                    setTimeout(() => processCommand(command), 500);
+                };
+                recognition.onerror = (event) => {
+                    stopListening();
+                    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+                        speak('Voice error. Try again.');
+                    }
+                };
+                recognition.onend = () => stopListening();
+                recognition.start();
+            } catch (error) {
+                speak('Failed to start voice recognition.');
+                stopListening();
+            }
+        }
+
+        function stopListening() {
+            game.listening = false;
+            micButton.classList.remove('listening');
+            if (recognition) {
+                try { recognition.stop(); } catch (e) {}
+                recognition = null;
+            }
+        }
+
+        function initializeGame() {
+            game.initialized = true;
+            micButton.classList.remove('start-button');
+            speakSequence([
+                'Echo. Tactical Ops.',
+                'Mission briefing: You are a special operations soldier deployed to a hostile compound.',
+                'Your objective: neutralize enemy combatants and secure the location.',
+                'You are equipped with an assault rifle, thirty rounds, two grenades, and one medical kit.',
+                'Rules of engagement are active. Watch your ammo.',
+                'Ready for deployment?'
+            ], () => {
+                game.started = true;
+                game.phase = 'approach';
+                setTimeout(() => describeScenario(), 1000);
+            });
+        }
+
+        function handleClick() {
+            if (!game.initialized) {
+                initializeGame();
+            } else {
+                startListening();
+            }
+        }
+
+        function describeScenario() {
+            const scenario = scenarios[game.mission.phase];
+            if (!scenario) return;
+
+            const messages = [scenario.description];
+            if (scenario.choices) {
+                messages.push(scenario.choices);
+            }
+            speakSequence(messages);
+        }
+
+        function processCommand(command) {
+            if (command.includes('status') || command.includes('check')) {
+                checkStatus();
+                return;
+            }
+
+            if (command.includes('gear') || command.includes('equipment') || command.includes('inventory')) {
+                checkGear();
+                return;
+            }
+
+            if (game.phase === 'combat') {
+                handleCombatCommand(command);
+                return;
+            }
+
+            if (game.mission.phase === 'approach') {
+                handleApproachCommand(command);
+            } else if (game.mission.phase === 'stealth') {
+                handleStealthCommand(command);
+            } else if (game.mission.phase === 'breach') {
+                handleBreachCommand(command);
+            } else {
+                speak('Command not recognized. Try: status, gear, or describe your action.');
+            }
+        }
+
+        function handleApproachCommand(command) {
+            if (command.includes('stealth') || command.includes('quiet') || command.includes('sentry') || command.includes('silent') || command.includes('sneak')) {
+                attemptStealth();
+            } else if (command.includes('breach') || command.includes('force') || command.includes('gate') || command.includes('kick') || command.includes('loud')) {
+                startBreach();
+            } else if (command.includes('look') || command.includes('observe') || command.includes('scan')) {
+                describeScenario();
+            } else {
+                speak('Do you want to go in quiet, or breach with force? Say stealth or breach.');
+            }
+        }
+
+        function handleStealthCommand(command) {
+            if (command.includes('engage') || command.includes('fire') || command.includes('shoot') || command.includes('attack')) {
+                game.phase = 'combat';
+                startCombat('sentry', 1);
+            } else if (command.includes('retreat') || command.includes('fall back') || command.includes('cover')) {
+                speakSequence([
+                    'You melt back into the shadows.',
+                    'The sentry scans the perimeter nervously but does not spot you.',
+                    'You have another chance.'
+                ], () => {
+                    game.mission.phase = 'approach';
+                    setTimeout(() => describeScenario(), 1000);
+                });
+            } else {
+                speak('The sentry is alerted. Engage or retreat?');
+            }
+        }
+
+        function handleBreachCommand(command) {
+            if (command.includes('aggressive') || command.includes('push') || command.includes('forward') || command.includes('charge')) {
+                speakSequence([
+                    'You surge through the gate, weapon up.',
+                    'Three hostiles scramble for weapons inside the compound.',
+                    'No time for subtlety now.'
+                ], () => {
+                    game.phase = 'combat';
+                    startCombat('hostile', 3);
+                });
+            } else if (command.includes('tactical') || command.includes('cover') || command.includes('careful') || command.includes('slow')) {
+                speakSequence([
+                    'You advance methodically, using cover.',
+                    'Concrete barriers provide protection.',
+                    'Two hostiles appear in a doorway ahead.'
+                ], () => {
+                    game.phase = 'combat';
+                    game.player.inCover = true;
+                    startCombat('hostile', 2);
+                });
+            } else {
+                speak('Push forward aggressively, or advance tactically with cover?');
+            }
+        }
+
+        function attemptStealth() {
+            game.mission.phase = 'stealth';
+            const success = Math.random() < 0.6;
+            
+            if (success) {
+                speakSequence([
+                    scenarios.stealthKill.success,
+                    'The compound is quieter now. Two sentries down.',
+                    'You approach the main building. The door is ajar.'
+                ], () => {
+                    game.mission.enemiesRemaining = 3;
+                    speakSequence([
+                        'You slip inside. Voices echo from deeper within.',
+                        'You can hear at least three hostiles.',
+                        'Do you want to breach or stay tactical?'
+                    ]);
+                    game.mission.phase = 'breach';
+                });
+            } else {
+                speakSequence([
+                    scenarios.stealthKill.failure,
+                    scenarios.stealthKill.choices
+                ]);
+            }
+        }
+
+        function startBreach() {
+            game.mission.phase = 'breach';
+            speakSequence([
+                scenarios.breach.description,
+                scenarios.breach.choices
+            ]);
+        }
+
+        function startCombat(enemyType, count) {
+            game.combat = {
+                enemyType: enemyType,
+                enemiesAlive: count,
+                playerInCover: game.player.inCover || false,
+                enemySuppressed: false,
+                turn: 1
+            };
+
+            speakSequence([
+                scenarios.combat.contact,
+                `${count} ${enemyType}${count > 1 ? 's' : ''} engaging!`,
+                'What are your orders? Fire, take cover, grenade, or use medkit.'
+            ]);
+        }
+
+        function handleCombatCommand(command) {
+            if (command.includes('fire') || command.includes('shoot') || command.includes('engage') || command.includes('attack')) {
+                fireWeapon();
+            } else if (command.includes('cover') || command.includes('duck') || command.includes('hide')) {
+                takeCover();
+            } else if (command.includes('grenade') || command.includes('throw') || command.includes('frag')) {
+                throwGrenade();
+            } else if (command.includes('medkit') || command.includes('heal') || command.includes('medical')) {
+                useMedkit();
+            } else if (command.includes('reload')) {
+                reloadWeapon();
+            } else if (command.includes('suppress') || command.includes('suppressive')) {
+                suppressiveFire();
+            } else {
+                speak('Say: fire, take cover, throw grenade, use medkit, reload, or suppress.');
+            }
+        }
+
+        function fireWeapon() {
+            if (game.player.ammo < 3) {
+                speak('You need to reload. Say reload.');
+                return;
+            }
+
+            game.player.ammo -= 3;
+            const hitChance = game.combat.playerInCover ? 0.7 : 0.5;
+            const hit = Math.random() < hitChance;
+
+            if (hit) {
+                game.combat.enemiesAlive--;
+                speakSequence([
+                    'Three round burst.',
+                    'Muzzle flash illuminates your target.',
+                    scenarios.combat.kill,
+                    `Ammo: ${game.player.ammo}.`,
+                    game.combat.enemiesAlive > 0 ? `${game.combat.enemiesAlive} hostile${game.combat.enemiesAlive > 1 ? 's' : ''} remaining.` : 'All hostiles down!'
+                ], () => {
+                    if (game.combat.enemiesAlive <= 0) {
+                        missionSuccess();
+                    } else {
+                        setTimeout(() => enemyTurn(), 1000);
+                    }
+                });
+            } else {
+                speakSequence([
+                    'You fire.',
+                    'Rounds spark off concrete.',
+                    'Miss!',
+                    `Ammo: ${game.player.ammo}.`
+                ], () => {
+                    setTimeout(() => enemyTurn(), 1000);
+                });
+            }
+        }
+
+        function takeCover() {
+            if (game.combat.playerInCover) {
+                speak('You are already in cover. Fire, grenade, reload, or suppress?');
+                return;
+            }
+
+            game.combat.playerInCover = true;
+            speakSequence([
+                'You dive behind cover.',
+                'Concrete barrier shields you.',
+                'You have tactical advantage.'
+            ], () => {
+                setTimeout(() => enemyTurn(), 1000);
+            });
+        }
+
+        function throwGrenade() {
+            if (game.player.grenades <= 0) {
+                speak('No grenades remaining.');
+                return;
+            }
+
+            game.player.grenades--;
+            const killed = Math.min(game.combat.enemiesAlive, Math.random() < 0.8 ? 2 : 1);
+            game.combat.enemiesAlive -= killed;
+
+            speakSequence([
+                'Grenade out!',
+                'You pull the pin and throw.',
+                'The explosion tears through the compound.',
+                'Shrapnel and debris fill the air.',
+                killed > 1 ? `${killed} hostiles eliminated!` : 'One hostile down!',
+                `Grenades remaining: ${game.player.grenades}.`,
+                game.combat.enemiesAlive > 0 ? `${game.combat.enemiesAlive} hostile${game.combat.enemiesAlive > 1 ? 's' : ''} still fighting.` : 'Area clear!'
+            ], () => {
+                if (game.combat.enemiesAlive <= 0) {
+                    missionSuccess();
+                } else {
+                    setTimeout(() => enemyTurn(), 1000);
+                }
+            });
+        }
+
+        function useMedkit() {
+            if (game.player.medkits <= 0) {
+                speak('No medkits remaining.');
+                return;
+            }
+
+            if (game.player.health >= game.player.maxHealth) {
+                speak('You are not wounded. Save the medkit.');
+                return;
+            }
+
+            game.player.medkits--;
+            const healing = Math.min(50, game.player.maxHealth - game.player.health);
+            game.player.health += healing;
+
+            speakSequence([
+                'You tear open the medkit.',
+                'Quick field dressing applied.',
+                `Health restored: ${game.player.health}.`,
+                `Medkits remaining: ${game.player.medkits}.`
+            ], () => {
+                setTimeout(() => enemyTurn(), 1000);
+            });
+        }
+
+        function reloadWeapon() {
+            if (game.player.ammo >= game.player.maxAmmo) {
+                speak('Magazine is full.');
+                return;
+            }
+
+            game.player.ammo = game.player.maxAmmo;
+            speakSequence([
+                scenarios.combat.reload,
+                `Ammo: ${game.player.ammo}.`,
+                'Weapon ready.'
+            ], () => {
+                setTimeout(() => enemyTurn(), 1000);
+            });
+        }
+
+        function suppressiveFire() {
+            if (game.player.ammo < 10) {
+                speak('Insufficient ammo for suppressive fire. Need 10 rounds.');
+                return;
+            }
+
+            game.player.ammo -= 10;
+            game.combat.enemySuppressed = true;
+
+            speakSequence([
+                'You lay down suppressive fire!',
+                'Rapid bursts keep their heads down.',
+                'Brass casings rain around you.',
+                'Enemies are pinned!',
+                `Ammo: ${game.player.ammo}.`
+            ], () => {
+                setTimeout(() => speak('What now? Fire, grenade, or reload?'), 500);
+            });
+        }
+
+        function enemyTurn() {
+            if (game.combat.enemySuppressed) {
+                game.combat.enemySuppressed = false;
+                speak('Enemies remain pinned. Your turn.');
+                return;
+            }
+
+            const hitChance = game.combat.playerInCover ? 0.3 : 0.6;
+            const hit = Math.random() < hitChance;
+
+            if (hit) {
+                const damage = game.combat.playerInCover ? 15 : 25;
+                game.player.health -= damage;
+
+                const messages = [
+                    scenarios.combat.suppressed,
+                    scenarios.combat.hit,
+                    `You take ${damage} damage!`,
+                    `Health: ${game.player.health}.`
+                ];
+
+                if (game.player.health <= 0) {
+                    speakSequence(messages, () => {
+                        setTimeout(() => missionFailed(), 1000);
+                    });
+                } else {
+                    speakSequence(messages, () => {
+                        setTimeout(() => speak('Your turn. Fire, cover, grenade, or medkit?'), 500);
+                    });
+                }
+            } else {
+                speakSequence([
+                    'Enemy fire erupts!',
+                    game.combat.playerInCover ? 'Rounds impact your cover!' : 'Bullets snap past your head!',
+                    'You are still in the fight!',
+                    'What are your orders?'
+                ]);
+            }
+        }
+
+        function missionSuccess() {
+            game.phase = 'complete';
+            game.combat = null;
+            speakSequence([
+                'Last hostile neutralized.',
+                'The compound falls silent.',
+                'You scan for threats. Clear.',
+                'Mission complete.',
+                `Final status: Health ${game.player.health}. Ammo ${game.player.ammo}.`,
+                'Exfil en route. Well done, operator.'
+            ]);
+        }
+
+        function missionFailed() {
+            game.phase = 'failed';
+            game.combat = null;
+            speakSequence([
+                'You fall.',
+                'Your vision blurs.',
+                'Radio chatter fades.',
+                'Mission failed.',
+                'Operator down.'
+            ]);
+        }
+
+        function checkStatus() {
+            const messages = [
+                `Health: ${game.player.health} of ${game.player.maxHealth}.`,
+                `Ammo: ${game.player.ammo} rounds.`,
+                `Grenades: ${game.player.grenades}.`,
+                `Medkits: ${game.player.medkits}.`
+            ];
+
+            if (game.phase === 'combat') {
+                messages.push(`Hostiles remaining: ${game.combat.enemiesAlive}.`);
+                messages.push(game.combat.playerInCover ? 'You are in cover.' : 'You are exposed.');
+            }
+
+            speakSequence(messages);
+        }
+
+        function checkGear() {
+            speakSequence([
+                'Gear check:',
+                'M4 carbine with thirty round magazine.',
+                `Current ammo: ${game.player.ammo}.`,
+                `Fragmentation grenades: ${game.player.grenades}.`,
+                `Field medical kits: ${game.player.medkits}.`,
+                'Body armor equipped.',
+                'Night vision capable.'
+            ]);
+        }
+
+        micButton.addEventListener('click', handleClick);
+        micButton.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        document.addEventListener('DOMContentLoaded', () => {
+            checkBrowserSupport();
+            setTimeout(() => {
+                const status = `HTTPS: ${browserSupport.https}. Speech: ${browserSupport.speechSynthesis}. Recognition: ${browserSupport.speechRecognition}.`;
+                console.log(status);
+                speak('Echo: Tactical Ops is ready. Tap the screen to begin your mission.');
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

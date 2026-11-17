@@ -48,153 +48,550 @@
     <button id="micButton" class="start-button" aria-label="Voice command button - Tap to speak"></button>
 
     <script>
+        // ============================================================
+        // ECHO: TACTICAL OPS - CAMPAIGN EDITION
+        // A voice-controlled tactical game for blind and visually
+        // impaired players.
+        // Copyright 2025 Asa Hartz Games - FREE for the community
+        //
+        // BLIND FIRST. ALWAYS.
+        // - Tap anywhere, wait for the chirp, then speak.
+        // - Everything is spoken. Nothing needs to be seen.
+        //
+        // HOW THIS FILE IS LAID OUT
+        //  PART 1  Page and browser checks
+        //  PART 2  Weapons, upgrades, missions  (the things to add to)
+        //  PART 3  Overwatch remarks            (the handler's voice)
+        //  PART 4  Game state and saving
+        //  PART 5  Speaking, chirp, listening
+        //  PART 6  The base: missions, armory, loadout
+        //  PART 7  Running a mission
+        //  PART 8  Combat
+        //  PART 9  Command router and startup
+        // ============================================================
+
+        // ============================================================
+        // PART 1: PAGE AND BROWSER CHECKS
+        // ============================================================
+
         const micButton = document.getElementById('micButton');
         const textDisplay = document.getElementById('textDisplay');
 
         function displayText(text) {
-            textDisplay.innerHTML = text;
+            textDisplay.textContent = text;
         }
 
-        let browserSupport = {
+        const browserSupport = {
             speechSynthesis: false,
             speechRecognition: false,
             https: false
         };
 
         function checkBrowserSupport() {
-            // Check if we're in Claude artifact viewer or actual HTTPS
-            const isClaudeArtifact = window.location.href.includes('claude.ai') || 
-                                      window.location.href.includes('anthropic') ||
-                                      window.location.protocol === 'https:' || 
-                                      window.location.hostname === 'localhost';
-            browserSupport.https = isClaudeArtifact;
+            browserSupport.https = window.location.protocol === 'https:' ||
+                                   window.location.hostname === 'localhost' ||
+                                   window.location.hostname === '127.0.0.1';
             browserSupport.speechSynthesis = !!(window.speechSynthesis && window.SpeechSynthesisUtterance);
             browserSupport.speechRecognition = !!(window.webkitSpeechRecognition || window.SpeechRecognition);
         }
 
-        const game = {
-            player: {
-                health: 100,
-                maxHealth: 100,
-                ammo: 30,
-                maxAmmo: 30,
-                grenades: 2,
-                medkits: 1,
-                position: 'approach'
+        // ============================================================
+        // PART 2: WEAPONS, UPGRADES, MISSIONS
+        //
+        // TO ADD A WEAPON, UPGRADE OR MISSION: copy one block, change
+        // the words and numbers. Nothing else in the file needs to
+        // change. "hears" is every way the microphone might hear it.
+        // ============================================================
+
+        // burst      rounds used by one "fire"
+        // hitOpen    chance to hit when you are out in the open (0 to 1)
+        // hitCover   chance to hit when you are behind cover
+        // suppress   rounds used by "suppress" (0 means it cannot)
+        // pinTurns   how many free moves you get after "suppress"
+        // quiet      added to your chance of a clean stealth approach
+        const WEAPONS = [
+            {
+                id: 'carbine', name: 'carbine', price: 0,
+                hears: ['carbine', 'car bean', 'carbon', 'assault rifle'],
+                mag: 30, burst: 3, hitOpen: 0.50, hitCover: 0.70, suppress: 10, pinTurns: 1, quiet: 0,
+                about: 'A balanced rifle. Thirty rounds, three round bursts.',
+                fireLine: 'Three round burst.'
             },
-            mission: {
-                name: 'Compound Breach',
-                objective: 'Neutralize hostiles and secure the compound',
-                phase: 'approach',
-                enemiesRemaining: 3,
-                alertLevel: 'unaware'
+            {
+                id: 'smg', name: 'submachine gun', price: 150,
+                hears: ['submachine gun', 'sub machine gun', 'submachine', 'smg', 's m g'],
+                mag: 40, burst: 4, hitOpen: 0.45, hitCover: 0.65, suppress: 8, pinTurns: 1, quiet: 0.10,
+                about: 'Light and quiet. Forty rounds, better for stealth, cheap to suppress with, a little less accurate.',
+                fireLine: 'A short, flat burst.'
             },
-            combat: null,
-            listening: false,
-            started: false,
-            initialized: false,
-            phase: 'init'
+            {
+                id: 'shotgun', name: 'shotgun', price: 200,
+                hears: ['shotgun', 'shot gun'],
+                mag: 8, burst: 1, hitOpen: 0.65, hitCover: 0.75, suppress: 0, pinTurns: 0, quiet: -0.05,
+                about: 'Hits hard up close, even in the open. Only eight shells, and it cannot suppress.',
+                fireLine: 'The shotgun booms.'
+            },
+            {
+                id: 'marksman', name: 'marksman rifle', price: 300,
+                hears: ['marksman rifle', 'marksman', 'marks man', 'sniper rifle', 'sniper'],
+                mag: 10, burst: 1, hitOpen: 0.55, hitCover: 0.90, suppress: 0, pinTurns: 0, quiet: 0.05,
+                about: 'Deadly from cover. Ten rounds, one shot at a time, and it cannot suppress.',
+                fireLine: 'One careful shot.'
+            },
+            {
+                id: 'lmg', name: 'machine gun', price: 400,
+                hears: ['machine gun', 'light machine gun', 'l m g', 'lmg'],
+                mag: 100, burst: 5, hitOpen: 0.45, hitCover: 0.60, suppress: 15, pinTurns: 2, quiet: -0.15,
+                about: 'One hundred rounds. Its suppressing fire buys you two free moves instead of one. Loud, and bad for stealth.',
+                fireLine: 'The machine gun hammers.'
+            }
+        ];
+
+        // Each upgrade is bought once and kept forever.
+        const UPGRADES = [
+            { id: 'armor',      name: 'armor plates',      price: 150, hears: ['armor plates', 'armor plate', 'armor', 'armour', 'plates'],
+              about: 'Every hit you take does five less damage.' },
+            { id: 'mags',       name: 'extended magazines', price: 150, hears: ['extended magazines', 'extended magazine', 'extended mags', 'magazines', 'magazine', 'mags'],
+              about: 'Half again as many rounds before each reload.' },
+            { id: 'grenades',   name: 'grenade pouch',     price: 100, hears: ['grenade pouch', 'grenade pack', 'pouch'],
+              about: 'Carry three grenades instead of two.' },
+            { id: 'medkits',    name: 'trauma kit',        price: 100, hears: ['trauma kit', 'trauma', 'medic bag', 'extra medkit'],
+              about: 'Carry two medkits instead of one.' },
+            { id: 'suppressor', name: 'suppressor',        price: 200, hears: ['suppressor', 'silencer', 'suppresser'],
+              about: 'Makes a clean stealth approach more likely.' },
+            { id: 'optics',     name: 'optics',            price: 250, hears: ['optics', 'optic', 'scope', 'sight'],
+              about: 'Every shot is more likely to hit.' },
+            { id: 'training',   name: 'conditioning',      price: 200, hears: ['conditioning', 'training', 'fitness'],
+              about: 'Twenty five more health.' }
+        ];
+
+        // Every mission is played the same way, so there is nothing new to
+        // learn each time:
+        //   1. APPROACH   say "stealth" or "breach"
+        //   2. ENTRY      say "push" or "tactical"
+        //   3. COMBAT     fire, cover, grenade, medkit, reload, suppress
+        //
+        // stealthChance  chance the quiet approach works (0 to 1)
+        // waves          how many enemies in each wave of the fight
+        // enemy          hitOpen / hitCover: their chance to hit you
+        //                damageOpen / damageCover: how hard they hit
+        // noGrenades     set to a sentence to forbid grenades, and say why
+        const MISSIONS = [
+            {
+                id: 'compound', name: 'Compound Breach', reward: 100,
+                hears: ['compound breach', 'compound'],
+                briefing: [
+                    'Mission one. Compound Breach.',
+                    'A hostile compound in the hills. Neutralize the fighters inside and secure the location.'
+                ],
+                approach: 'You crouch in the darkness outside a militant compound. Two sentries patrol the perimeter fence, their boots crunching on gravel. An oil drum fire crackles. The main gate is twenty meters ahead.',
+                stealthChance: 0.60,
+                stealthSuccess: 'You move like smoke through the shadows. The first sentry never hears you coming. You drag him into the dark, then take the second the same way. The compound is quieter now.',
+                stealthFailure: 'You lunge from cover, but your boot catches loose gravel. The sharp crunch echoes. The sentry spins and raises his rifle.',
+                breach: 'You stack up at the compound gate. Three. Two. One. You kick it open. It crashes inward, and shouting erupts from inside.',
+                entry: 'The main building is ahead. Voices echo from deeper within.',
+                push: 'You surge through the doorway, weapon up. Fighters scramble for their weapons.',
+                tactical: 'You advance methodically. A concrete barrier gives you cover as fighters appear in a doorway ahead.',
+                waves: [3],
+                waveLines: [],
+                enemy: { one: 'hostile', many: 'hostiles', hitOpen: 0.60, hitCover: 0.30, damageOpen: 25, damageCover: 15 },
+                success: 'The compound falls silent. You scan for threats. Clear.'
+            },
+            {
+                id: 'convoy', name: 'Night Convoy', reward: 150,
+                hears: ['night convoy', 'convoy'],
+                briefing: [
+                    'Mission two. Night Convoy.',
+                    'A weapons convoy is crossing the mountain pass tonight. Stop it before it reaches the border.'
+                ],
+                approach: 'You lie on cold rock above a mountain road. Wind hisses through dry grass. Below, three trucks grind uphill in low gear, engines echoing off the cliff. The lead truck has stopped at a fallen tree, and the drivers are climbing out.',
+                stealthChance: 0.55,
+                stealthSuccess: 'You slide down the slope while they argue over the tree. One guard has wandered to the rear truck. You reach him first. Then you fix a charge under the lead truck and crawl back unheard.',
+                stealthFailure: 'A stone slips under your knee and clatters all the way down to the road. A flashlight swings up the slope and someone shouts.',
+                breach: 'You open fire from the ridge. The lead truck\'s windshield shatters. Men pour out of the cabs and dive behind the wheels.',
+                entry: 'The guards are bunched between the trucks, shouting to each other over the idling engines.',
+                push: 'You sprint down the slope and into the road before they can organize.',
+                tactical: 'You work along the ridge to a boulder that overlooks the trucks, and settle in behind it.',
+                waves: [4],
+                waveLines: [],
+                enemy: { one: 'guard', many: 'guards', hitOpen: 0.60, hitCover: 0.35, damageOpen: 25, damageCover: 16 },
+                success: 'The engines idle on with nobody left to drive them. You mark the trucks for demolition and move out.'
+            },
+            {
+                id: 'hostage', name: 'Hostage Rescue', reward: 200,
+                hears: ['hostage rescue', 'hostage', 'hostages', 'rescue'],
+                briefing: [
+                    'Mission three. Hostage Rescue.',
+                    'Two aid workers are being held in an apartment block. Bring them out alive.',
+                    'No grenades on this one. The hostages are inside.'
+                ],
+                approach: 'You stand in a dark stairwell that smells of damp concrete. Somewhere above, a television murmurs behind a door. A lookout sits on the third floor landing. You can hear his chair creak and the click of his lighter.',
+                stealthChance: 0.50,
+                stealthSuccess: 'You climb on the edges of the steps, where they do not creak. The lookout is lighting another cigarette when you reach him. He goes down without a sound.',
+                stealthFailure: 'A bottle rolls under your boot and rings down the stairwell. The chair above scrapes back. He is on his feet.',
+                breach: 'You take the stairs three at a time. The lookout shouts a warning down the hall before he runs.',
+                entry: 'The apartment door is at the end of the hall. Behind it you hear men\'s voices, and someone crying quietly.',
+                push: 'You hit the door with your shoulder and go straight in.',
+                tactical: 'You ease the door open and slip into the hallway, keeping a wall between you and the main room.',
+                waves: [3, 3],
+                waveLines: ['The main room is clear. Then boots pound on the stairs behind you. Reinforcements from the floor below.'],
+                enemy: { one: 'kidnapper', many: 'kidnappers', hitOpen: 0.62, hitCover: 0.45, damageOpen: 26, damageCover: 20 },
+                noGrenades: 'Negative. The hostages are in there. No grenades.',
+                success: 'You cut the hostages free. They are shaken, but they can walk. You lead them down the stairs and out into the night air.'
+            },
+            {
+                id: 'harbor', name: 'Harbor Raid', reward: 275,
+                hears: ['harbor raid', 'harbour raid', 'harbor', 'harbour', 'raid'],
+                briefing: [
+                    'Mission four. Harbor Raid.',
+                    'A smuggling crew is loading a freighter at the old container docks. Shut the operation down.',
+                    'These men are better trained than the last lot.'
+                ],
+                approach: 'You crouch between stacked shipping containers. Rain drums on steel. A crane motor whines somewhere overhead, and water slaps against the pier. Two men stand guard under a buzzing floodlight by the gangway.',
+                stealthChance: 0.50,
+                stealthSuccess: 'You wait for the crane to swing and cover the noise, then cross the gap. The first guard goes down behind a forklift. The second never turns around. You cut the power to the floodlight on your way past.',
+                stealthFailure: 'A loose chain swings into a container as you pass. The clang rolls across the whole dock. Both guards turn toward the sound.',
+                breach: 'You shoot out the floodlight. The dock goes dark, an alarm starts to wail, and men shout along the pier.',
+                entry: 'The crew is spread out between the containers and the gangway. Forklifts and crates give them plenty to hide behind.',
+                push: 'You run straight down the pier toward the gangway while they are still finding their weapons.',
+                tactical: 'You move from container to container, staying behind steel the whole way.',
+                waves: [4, 4],
+                waveLines: ['The pier is clear. Then a hatch bangs open on the freighter and more men come down the gangway.'],
+                enemy: { one: 'smuggler', many: 'smugglers', hitOpen: 0.65, hitCover: 0.48, damageOpen: 28, damageCover: 22 },
+                success: 'The alarm winds down to nothing. Rain keeps falling on an empty pier. You call in the boarding team.'
+            },
+            {
+                id: 'stronghold', name: 'Mountain Stronghold', reward: 400,
+                hears: ['mountain stronghold', 'stronghold', 'mountain', 'strong hold'],
+                briefing: [
+                    'Mission five. Mountain Stronghold.',
+                    'This is where the orders have been coming from. A fortified bunker above the snow line.',
+                    'Expect three waves, and expect them to be good. Bring everything you have.'
+                ],
+                approach: 'You lie in snow below a concrete bunker cut into the mountainside. The wind is bitter and steady. A generator thuds somewhere inside. One sentry paces the wall above you, stamping his feet against the cold.',
+                stealthChance: 0.45,
+                stealthSuccess: 'You climb the wall while the wind covers every sound. The sentry is blowing on his hands when you reach him. You lower him into the snow and slip through the blast door.',
+                stealthFailure: 'Ice breaks away under your glove and shatters on the rocks below. The sentry leans over the wall, and a whistle blows.',
+                breach: 'You set a charge on the blast door and turn away. The explosion rolls down the valley. A siren begins to howl inside.',
+                entry: 'A long concrete corridor leads into the mountain. The generator is louder here. Men are shouting orders somewhere ahead.',
+                push: 'You run the corridor at full speed and burst into the first chamber.',
+                tactical: 'You move down the corridor from doorway to doorway, clearing each one as you go.',
+                waves: [4, 4, 3],
+                waveLines: [
+                    'The first chamber is clear. A steel door grinds open ahead, and the next squad comes through it.',
+                    'Only the command room is left. Two bodyguards stand between you and the commander.'
+                ],
+                enemy: { one: 'soldier', many: 'soldiers', hitOpen: 0.70, hitCover: 0.50, damageOpen: 30, damageCover: 24 },
+                success: 'The generator winds down and the lights flicker out. The mountain is quiet. You key your radio. Stronghold secure.'
+            }
+        ];
+
+        // ============================================================
+        // PART 3: OVERWATCH REMARKS
+        // Overwatch is your handler on the radio: dry, teasing, and
+        // secretly fond of you. Add, change or delete lines freely.
+        // "chance" is how often a remark is made (1 = every time).
+        // Say "overwatch off" in the game to silence the remarks.
+        // ============================================================
+
+        const REMARKS = {
+            deploy: { chance: 1, lines: [
+                'Overwatch here. Try to bring the equipment back this time.',
+                'Overwatch here. I have coffee and a comfortable chair. You have the hard part.',
+                'Overwatch here. Remember your training. Or failing that, duck.',
+                'Overwatch here. No pressure, but I told everyone you were good at this.'
+            ] },
+            stealthWin: { chance: 0.8, lines: [
+                'Overwatch. Very sneaky. I almost did not hear you breathing into the microphone.',
+                'Overwatch. Quiet as a mouse. A large, heavily armed mouse.',
+                'Overwatch. Smooth. I am almost impressed.'
+            ] },
+            stealthFail: { chance: 0.8, lines: [
+                'Overwatch. Subtle. Very subtle.',
+                'Overwatch. So much for the quiet option.',
+                'Overwatch. I believe they heard that in the next valley.'
+            ] },
+            kill: { chance: 0.35, lines: [
+                'Overwatch. Good hit.',
+                'Overwatch. That one is not getting up.',
+                'Overwatch. Tidy.',
+                'Overwatch. Keep that up and I might learn your name.'
+            ] },
+            miss: { chance: 0.35, lines: [
+                'Overwatch. The wall had it coming.',
+                'Overwatch. Warning shots. Very generous of you.',
+                'Overwatch. Closer. In the sense that you are in the same country.',
+                'Overwatch. Try aiming at the ones who are shooting.'
+            ] },
+            hurt: { chance: 0.35, lines: [
+                'Overwatch. That sounded expensive.',
+                'Overwatch. Walk it off. Quickly.',
+                'Overwatch. Cover exists. I am told it is very popular.'
+            ] },
+            grenade: { chance: 0.5, lines: [
+                'Overwatch. That is one way to knock.',
+                'Overwatch. Loud. I approve.',
+                'Overwatch. Somebody is going to have to sweep that up.'
+            ] },
+            win: { chance: 1, lines: [
+                'Overwatch. Not bad. I had already started on the paperwork for the other outcome.',
+                'Overwatch. Nicely done. Drinks are on you.',
+                'Overwatch. Clean work. I will try to sound surprised in the report.',
+                'Overwatch. You made that sound easy. Do not let it go to your head.'
+            ] },
+            lose: { chance: 1, lines: [
+                'Overwatch. Medics are on the way. Try not to bleed on the radio.',
+                'Overwatch. We will call that a rehearsal.',
+                'Overwatch. Hold on. I am sending someone to carry you home.'
+            ] },
+            buy: { chance: 0.7, lines: [
+                'Overwatch. Shiny. Try not to lose it.',
+                'Overwatch. Good choice. I was getting embarrassed for you.',
+                'Overwatch. Sign here, here and here. In triplicate.'
+            ] }
         };
 
-        const scenarios = {
-            approach: {
-                description: 'You crouch in the darkness outside a militant compound. Moonlight gleams off corrugated metal roofs. Two sentries patrol the perimeter fence, their silhouettes visible against flickering oil drum fires. Intel says three more hostiles are inside the main structure. Your weapon is loaded. Your radio crackles softly.',
-                choices: 'You can breach the front gate with force, take out the sentries quietly, or find another way in. What are your orders?'
-            },
-            stealthKill: {
-                success: 'You move like smoke through the shadows. The first sentry never sees you coming. Your blade finds its mark, silent and efficient. You drag the body into darkness. One down. The second guard is twenty meters away, oblivious.',
-                failure: 'You lunge from cover but your boot catches loose gravel. The sharp crunch echoes. The sentry spins, raising his AK. Muzzle flash erupts in the darkness.',
-                choices: 'The second sentry is alerted. Engage or retreat to cover?'
-            },
-            breach: {
-                description: 'You stack up at the compound gate, weapon at the ready. Your heart hammers. On your mark. Three. Two. One. You kick the gate open with explosive force. It crashes inward. Shouting erupts from inside. You are committed now.',
-                choices: 'Enemies are scrambling. Push forward aggressively or advance tactically with covering fire?'
-            },
-            combat: {
-                contact: 'Hostiles have engaged! Incoming fire!',
-                suppressed: 'You hear rounds snapping over your head. Dirt and concrete chips spray around you.',
-                reload: 'Magazine empty. You drop it and slam a fresh one home.',
-                hit: 'A round catches your vest. The impact steals your breath.',
-                kill: 'Your shots find their mark. The hostile drops.'
+        // Picks lines in a shuffled order, so none repeats until the whole list has been heard.
+        function pickFrom(list) {
+            if (!list.bag || !list.bag.length) {
+                list.bag = list.slice();
+                for (let i = list.bag.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    const swap = list.bag[i]; list.bag[i] = list.bag[j]; list.bag[j] = swap;
+                }
             }
-        };
+            return list.bag.pop();
+        }
 
-        function speak(text, callback) {
-            displayText(text);
-            if (!browserSupport.speechSynthesis) {
-                if (callback) setTimeout(callback, 2000);
-                return;
-            }
+        // Returns a remark, or nothing, depending on the chance and the on/off setting.
+        function remark(kind) {
+            const set = REMARKS[kind];
+            if (!profile.overwatch || !set || Math.random() >= set.chance) return '';
+            return pickFrom(set.lines);
+        }
+
+        // ============================================================
+        // PART 4: GAME STATE AND SAVING
+        // The profile is what you keep between missions. It is saved on
+        // this device only. Nothing is sent anywhere.
+        // ============================================================
+
+        const SAVE_KEY = 'echoTacOps_profile';
+
+        function freshProfile() {
+            return {
+                credits: 0,
+                completed: {},
+                weapons: ['carbine'],
+                equipped: 'carbine',
+                upgrades: [],
+                overwatch: true,
+                missionsRun: 0
+            };
+        }
+
+        let profile = freshProfile();
+
+        function loadProfile() {
             try {
-                speechSynthesis.cancel();
-                setTimeout(() => {
-                    const utterance = new SpeechSynthesisUtterance(text.replace(/<[^>]*>/g, ''));
-                    utterance.rate = 0.9;
-                    utterance.pitch = 0.95;
-                    if (callback) {
-                        utterance.onend = callback;
-                        utterance.onerror = callback;
-                    }
-                    speechSynthesis.speak(utterance);
-                }, 100);
-            } catch (error) {
-                if (callback) setTimeout(callback, 2000);
+                const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+                if (saved && typeof saved === 'object') {
+                    const base = freshProfile();
+                    profile = {
+                        credits: Number(saved.credits) > 0 ? Math.floor(Number(saved.credits)) : 0,
+                        completed: (saved.completed && typeof saved.completed === 'object') ? saved.completed : {},
+                        weapons: Array.isArray(saved.weapons) ? saved.weapons.filter(id => WEAPONS.some(w => w.id === id)) : base.weapons,
+                        equipped: saved.equipped,
+                        upgrades: Array.isArray(saved.upgrades) ? saved.upgrades.filter(id => UPGRADES.some(u => u.id === id)) : [],
+                        overwatch: saved.overwatch !== false,
+                        missionsRun: Number(saved.missionsRun) || 0
+                    };
+                    if (!profile.weapons.includes('carbine')) profile.weapons.unshift('carbine');
+                    if (!profile.weapons.includes(profile.equipped)) profile.equipped = 'carbine';
+                }
+            } catch (e) {
+                profile = freshProfile();
             }
         }
 
-        function speakSequence(messages, callback) {
-            if (messages.length === 0) {
-                if (callback) callback();
-                return;
+        function saveProfile() {
+            try {
+                localStorage.setItem(SAVE_KEY, JSON.stringify(profile));
+            } catch (e) {
+                // Saving is best effort. The game carries on without it.
             }
-            const [first, ...rest] = messages;
-            speak(first, () => {
-                if (rest.length > 0) {
-                    setTimeout(() => speakSequence(rest, callback), 700);
-                } else if (callback) {
-                    callback();
+        }
+
+        const game = {
+            started: false,
+            listening: false,
+            screen: 'intro',        // intro, base, mission
+            stage: '',              // approach, alerted, entry, combat
+            mission: null,          // the mission being played
+            player: null,           // health, ammo and supplies for this mission
+            combat: null,
+            confirmReset: false,
+            lastReport: []
+        };
+
+        function hasUpgrade(id) {
+            return profile.upgrades.includes(id);
+        }
+
+        function equippedWeapon() {
+            return WEAPONS.find(w => w.id === profile.equipped) || WEAPONS[0];
+        }
+
+        function magazineSize() {
+            const size = equippedWeapon().mag;
+            return hasUpgrade('mags') ? Math.floor(size * 1.5) : size;
+        }
+
+        function missionUnlocked(index) {
+            return index === 0 || !!profile.completed[MISSIONS[index - 1].id];
+        }
+
+        // The first mission you have not finished yet. If all are done, the last one.
+        function nextMissionIndex() {
+            for (let i = 0; i < MISSIONS.length; i++) {
+                if (!profile.completed[MISSIONS[i].id]) return i;
+            }
+            return MISSIONS.length - 1;
+        }
+
+        function plural(count, one, many) {
+            return count + ' ' + (count === 1 ? one : many);
+        }
+
+        // ============================================================
+        // PART 5: SPEAKING, CHIRP, LISTENING
+        //
+        // IMPORTANT RULE FOR THIS FILE: the game never waits for speech
+        // to finish before changing anything. Each command works out
+        // everything that happens, then says it. That way a tap in the
+        // middle of a sentence can never leave the game stuck.
+        // ============================================================
+
+        let speechToken = 0;
+
+        function stopSpeech() {
+            speechToken++;
+            try {
+                if (window.speechSynthesis) window.speechSynthesis.cancel();
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        // Says a list of lines, one after another. Saying something new
+        // stops whatever was being said before.
+        function say(lines) {
+            const list = (Array.isArray(lines) ? lines : [lines]).filter(Boolean);
+            game.lastReport = list.slice();
+            displayText(list.join(' '));
+            stopSpeech();
+            if (!browserSupport.speechSynthesis || list.length === 0) return;
+
+            const token = speechToken;
+            let index = 0;
+            function next() {
+                if (token !== speechToken || index >= list.length) return;
+                const utterance = new SpeechSynthesisUtterance(list[index++]);
+                utterance.rate = 0.95;
+                utterance.pitch = 0.95;
+                let moved = false;
+                function onward() {
+                    if (moved) return;
+                    moved = true;
+                    setTimeout(next, 300);
                 }
-            });
+                utterance.onend = onward;
+                utterance.onerror = onward;
+                try {
+                    window.speechSynthesis.speak(utterance);
+                } catch (e) {
+                    onward();
+                }
+            }
+            setTimeout(next, 100);
+        }
+
+        // A short chirp so the player knows when the microphone opens and closes.
+        // 'start' rises, 'stop' falls. Made in the browser, no sound file needed.
+        let chirpContext = null;
+        function chirp(kind) {
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextClass) return;
+                if (!chirpContext) chirpContext = new AudioContextClass();
+                if (chirpContext.state === 'suspended') chirpContext.resume();
+                const now = chirpContext.currentTime;
+                const tone = chirpContext.createOscillator();
+                const volume = chirpContext.createGain();
+                tone.type = 'sine';
+                tone.frequency.setValueAtTime(kind === 'start' ? 660 : 880, now);
+                tone.frequency.exponentialRampToValueAtTime(kind === 'start' ? 990 : 520, now + 0.12);
+                volume.gain.setValueAtTime(0.0001, now);
+                volume.gain.exponentialRampToValueAtTime(0.25, now + 0.02);
+                volume.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+                tone.connect(volume);
+                volume.connect(chirpContext.destination);
+                tone.start(now);
+                tone.stop(now + 0.16);
+            } catch (e) {
+                // A missing chirp must never stop the game.
+            }
         }
 
         let recognition = null;
 
         function startListening() {
             if (!browserSupport.speechRecognition || !browserSupport.https) {
-                speak('Voice recognition requires HTTPS and a compatible browser like Chrome or Edge.');
+                say('Voice recognition needs a secure web address and a browser like Chrome or Edge.');
                 return;
             }
-            if (game.listening) { stopListening(); return; }
+            if (game.listening) {
+                stopListening();
+                return;
+            }
+            // Stop talking first, so the microphone does not hear the game.
+            stopSpeech();
             try {
                 const Recognition = window.webkitSpeechRecognition || window.SpeechRecognition;
                 recognition = new Recognition();
                 recognition.continuous = false;
+                recognition.interimResults = false;
                 recognition.lang = 'en-US';
                 recognition.onstart = () => {
                     game.listening = true;
                     micButton.classList.add('listening');
                 };
                 recognition.onresult = (event) => {
-                    const command = event.results[0][0].transcript.toLowerCase().trim();
-                    displayText(`You said: "${command}"`);
+                    const command = event.results[0][0].transcript;
                     stopListening();
-                    setTimeout(() => processCommand(command), 500);
+                    setTimeout(() => processCommand(command), 400);
                 };
                 recognition.onerror = (event) => {
                     stopListening();
-                    if (event.error !== 'no-speech' && event.error !== 'aborted') {
-                        speak('Voice error. Try again.');
+                    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                        say('The microphone is blocked. Please allow the microphone for this page.');
+                    } else if (event.error === 'no-speech') {
+                        say('I did not hear anything. Tap and try again.');
+                    } else if (event.error !== 'aborted') {
+                        say('Voice error. Tap and try again.');
                     }
                 };
                 recognition.onend = () => stopListening();
+                chirp('start');
                 recognition.start();
             } catch (error) {
-                speak('Failed to start voice recognition.');
                 stopListening();
+                say('The microphone did not start. Tap to try again.');
             }
         }
 
         function stopListening() {
+            if (game.listening) chirp('stop');
             game.listening = false;
             micButton.classList.remove('listening');
             if (recognition) {
@@ -203,437 +600,716 @@
             }
         }
 
-        function initializeGame() {
-            game.initialized = true;
-            micButton.classList.remove('start-button');
-            speakSequence([
-                'Echo. Tactical Ops.',
-                'Mission briefing: You are a special operations soldier deployed to a hostile compound.',
-                'Your objective: neutralize enemy combatants and secure the location.',
-                'You are equipped with an assault rifle, thirty rounds, two grenades, and one medical kit.',
-                'Rules of engagement are active. Watch your ammo.',
-                'Ready for deployment?'
-            ], () => {
-                game.started = true;
-                game.phase = 'approach';
-                setTimeout(() => describeScenario(), 1000);
+        // Turns what was heard into plain lowercase words with a space at each end,
+        // so whole words can be matched ("ops" must not match "oops").
+        function plain(text) {
+            return ' ' + String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+        }
+
+        function heard(command, words) {
+            return words.some(word => command.includes(plain(word)));
+        }
+
+        // Finds the weapon, upgrade or mission that was named. When two could
+        // match ("rifle" and "marksman rifle"), the longer name wins.
+        function findNamed(command, list) {
+            let best = null;
+            let bestLength = 0;
+            for (const item of list) {
+                for (const word of item.hears.concat([item.name])) {
+                    const wanted = plain(word);
+                    if (command.includes(wanted) && wanted.length > bestLength) {
+                        best = item;
+                        bestLength = wanted.length;
+                    }
+                }
+            }
+            return best;
+        }
+
+        const NUMBER_WORDS = [
+            ['one', '1', 'first'],
+            ['two', '2', 'second'],
+            ['three', '3', 'third'],
+            ['four', '4', 'fourth'],
+            ['five', '5', 'fifth'],
+            ['six', '6', 'sixth'],
+            ['seven', '7', 'seventh'],
+            ['eight', '8', 'eighth']
+        ];
+
+        function findNumber(command) {
+            for (let i = 0; i < NUMBER_WORDS.length; i++) {
+                if (heard(command, NUMBER_WORDS[i])) return i;
+            }
+            return -1;
+        }
+
+        // ============================================================
+        // PART 6: THE BASE - MISSIONS, ARMORY, LOADOUT
+        // ============================================================
+
+        const BASE_PROMPT = 'Say deploy, missions, armory, or help.';
+
+        function goToBase(lines) {
+            game.screen = 'base';
+            game.stage = '';
+            game.mission = null;
+            game.combat = null;
+            game.player = null;
+            const list = (lines || []).slice();
+            list.push(BASE_PROMPT);
+            say(list);
+        }
+
+        function baseWelcome() {
+            const next = MISSIONS[nextMissionIndex()];
+            const allDone = MISSIONS.every(m => profile.completed[m.id]);
+            const lines = [];
+            if (profile.missionsRun === 0) {
+                lines.push('Echo. Tactical Ops.');
+                lines.push('You are a special operations soldier. Finish missions to earn credits, then spend them in the armory on new weapons and upgrades.');
+                lines.push('Your first mission is ' + next.name + '.');
+            } else {
+                lines.push('Welcome back, operator. You have ' + plural(profile.credits, 'credit', 'credits') + '.');
+                lines.push(allDone ? 'Every mission is complete. You can replay any of them for half pay.' : 'Your next mission is ' + next.name + '.');
+            }
+            goToBase(lines);
+        }
+
+        function listMissions() {
+            const lines = ['Missions.'];
+            MISSIONS.forEach((mission, index) => {
+                let state;
+                if (profile.completed[mission.id]) state = 'complete. Replay pays ' + Math.floor(mission.reward / 2) + ' credits';
+                else if (missionUnlocked(index)) state = 'ready. Pays ' + mission.reward + ' credits';
+                else state = 'locked';
+                lines.push((index + 1) + '. ' + mission.name + ', ' + state + '.');
             });
+            lines.push('Say deploy for your next mission, or say mission and a number.');
+            say(lines);
         }
 
-        function handleClick() {
-            if (!game.initialized) {
-                initializeGame();
+        function armoryIntro() {
+            say([
+                'Armory. You have ' + plural(profile.credits, 'credit', 'credits') + '.',
+                'You carry the ' + equippedWeapon().name + '.',
+                'Say weapons or upgrades to hear what is for sale.'
+            ]);
+        }
+
+        function listWeapons() {
+            const lines = ['Weapons. You have ' + plural(profile.credits, 'credit', 'credits') + '.'];
+            WEAPONS.forEach(weapon => {
+                let state;
+                if (profile.equipped === weapon.id) state = 'equipped';
+                else if (profile.weapons.includes(weapon.id)) state = 'owned';
+                else state = weapon.price + ' credits';
+                lines.push(weapon.name + ', ' + state + '. ' + weapon.about);
+            });
+            lines.push('Say buy and a weapon name, or equip and a weapon name.');
+            say(lines);
+        }
+
+        function listUpgrades() {
+            const lines = ['Upgrades. You have ' + plural(profile.credits, 'credit', 'credits') + '.'];
+            UPGRADES.forEach(upgrade => {
+                const state = hasUpgrade(upgrade.id) ? 'owned' : upgrade.price + ' credits';
+                lines.push(upgrade.name + ', ' + state + '. ' + upgrade.about);
+            });
+            lines.push('Say buy and an upgrade name.');
+            say(lines);
+        }
+
+        function describeItem(item, isWeapon) {
+            const owned = isWeapon ? profile.weapons.includes(item.id) : hasUpgrade(item.id);
+            const lines = [item.name + '. ' + item.about];
+            if (owned) lines.push(isWeapon ? 'You own it. Say equip ' + item.name + ' to carry it.' : 'You own it.');
+            else lines.push('It costs ' + item.price + ' credits. You have ' + profile.credits + '. Say buy ' + item.name + '.');
+            say(lines);
+        }
+
+        function buyItem(item, isWeapon) {
+            const owned = isWeapon ? profile.weapons.includes(item.id) : hasUpgrade(item.id);
+            if (owned) {
+                if (isWeapon) return equipWeapon(item);
+                return say('You already own ' + item.name + '.');
+            }
+            if (profile.credits < item.price) {
+                return say(item.name + ' costs ' + item.price + ' credits. You have ' + profile.credits + '. Finish a mission to earn more.');
+            }
+            profile.credits -= item.price;
+            const lines = [];
+            if (isWeapon) {
+                profile.weapons.push(item.id);
+                profile.equipped = item.id;
+                lines.push('Bought and equipped: ' + item.name + '.');
             } else {
-                startListening();
+                profile.upgrades.push(item.id);
+                lines.push('Bought: ' + item.name + '. ' + item.about);
             }
+            saveProfile();
+            lines.push(remark('buy'));
+            lines.push(plural(profile.credits, 'credit', 'credits') + ' left.');
+            say(lines);
         }
 
-        function describeScenario() {
-            const scenario = scenarios[game.mission.phase];
-            if (!scenario) return;
-
-            const messages = [scenario.description];
-            if (scenario.choices) {
-                messages.push(scenario.choices);
+        function equipWeapon(weapon) {
+            if (!profile.weapons.includes(weapon.id)) {
+                return say('You do not own the ' + weapon.name + '. It costs ' + weapon.price + ' credits. Say buy ' + weapon.name + '.');
             }
-            speakSequence(messages);
+            profile.equipped = weapon.id;
+            saveProfile();
+            say('Equipped: ' + weapon.name + '. ' + weapon.about);
         }
 
-        function processCommand(command) {
-            if (command.includes('status') || command.includes('check')) {
-                checkStatus();
-                return;
-            }
-
-            if (command.includes('gear') || command.includes('equipment') || command.includes('inventory')) {
-                checkGear();
-                return;
-            }
-
-            if (game.phase === 'combat') {
-                handleCombatCommand(command);
-                return;
-            }
-
-            if (game.mission.phase === 'approach') {
-                handleApproachCommand(command);
-            } else if (game.mission.phase === 'stealth') {
-                handleStealthCommand(command);
-            } else if (game.mission.phase === 'breach') {
-                handleBreachCommand(command);
-            } else {
-                speak('Command not recognized. Try: status, gear, or describe your action.');
-            }
+        function describeLoadout() {
+            const weapon = equippedWeapon();
+            const names = UPGRADES.filter(u => hasUpgrade(u.id)).map(u => u.name);
+            say([
+                'Loadout. ' + weapon.name + ', ' + magazineSize() + ' rounds.',
+                (hasUpgrade('grenades') ? 'Three' : 'Two') + ' grenades. ' + (hasUpgrade('medkits') ? 'Two medkits.' : 'One medkit.'),
+                names.length ? 'Upgrades: ' + names.join(', ') + '.' : 'No upgrades yet.',
+                plural(profile.credits, 'credit', 'credits') + '.'
+            ]);
         }
 
-        function handleApproachCommand(command) {
-            if (command.includes('stealth') || command.includes('quiet') || command.includes('sentry') || command.includes('silent') || command.includes('sneak')) {
-                attemptStealth();
-            } else if (command.includes('breach') || command.includes('force') || command.includes('gate') || command.includes('kick') || command.includes('loud')) {
-                startBreach();
-            } else if (command.includes('look') || command.includes('observe') || command.includes('scan')) {
-                describeScenario();
-            } else {
-                speak('Do you want to go in quiet, or breach with force? Say stealth or breach.');
-            }
+        function careerStatus() {
+            const done = MISSIONS.filter(m => profile.completed[m.id]).length;
+            say([
+                plural(done, 'mission', 'missions') + ' complete out of ' + MISSIONS.length + '.',
+                plural(profile.credits, 'credit', 'credits') + '.',
+                'You carry the ' + equippedWeapon().name + '.'
+            ]);
         }
 
-        function handleStealthCommand(command) {
-            if (command.includes('engage') || command.includes('fire') || command.includes('shoot') || command.includes('attack')) {
-                game.phase = 'combat';
-                startCombat('sentry', 1);
-            } else if (command.includes('retreat') || command.includes('fall back') || command.includes('cover')) {
-                speakSequence([
-                    'You melt back into the shadows.',
-                    'The sentry scans the perimeter nervously but does not spot you.',
-                    'You have another chance.'
-                ], () => {
-                    game.mission.phase = 'approach';
-                    setTimeout(() => describeScenario(), 1000);
-                });
-            } else {
-                speak('The sentry is alerted. Engage or retreat?');
-            }
+        function baseHelp() {
+            say([
+                'At base you can say:',
+                'Deploy, to start your next mission.',
+                'Missions, to hear the list. Then mission and a number.',
+                'Armory, then weapons or upgrades. Then buy or equip and a name.',
+                'Loadout, to hear what you carry.',
+                'Repeat, to hear the last thing again.',
+                'Overwatch off, or overwatch on, for the radio remarks.',
+                'Reset career, to start over from nothing.'
+            ]);
         }
 
-        function handleBreachCommand(command) {
-            if (command.includes('aggressive') || command.includes('push') || command.includes('forward') || command.includes('charge')) {
-                speakSequence([
-                    'You surge through the gate, weapon up.',
-                    'Three hostiles scramble for weapons inside the compound.',
-                    'No time for subtlety now.'
-                ], () => {
-                    game.phase = 'combat';
-                    startCombat('hostile', 3);
-                });
-            } else if (command.includes('tactical') || command.includes('cover') || command.includes('careful') || command.includes('slow')) {
-                speakSequence([
-                    'You advance methodically, using cover.',
-                    'Concrete barriers provide protection.',
-                    'Two hostiles appear in a doorway ahead.'
-                ], () => {
-                    game.phase = 'combat';
-                    game.player.inCover = true;
-                    startCombat('hostile', 2);
-                });
-            } else {
-                speak('Push forward aggressively, or advance tactically with cover?');
+        function handleBaseCommand(command) {
+            // Starting over needs a second, deliberate answer.
+            if (game.confirmReset) {
+                game.confirmReset = false;
+                if (heard(command, ['yes', 'confirm', 'yeah', 'yep'])) {
+                    profile = freshProfile();
+                    saveProfile();
+                    return goToBase(['Career reset. You are starting from nothing.']);
+                }
+                return goToBase(['Reset cancelled. Nothing was changed.']);
             }
+            if (heard(command, ['reset career', 'reset', 'start over', 'new career'])) {
+                game.confirmReset = true;
+                return say('This erases your credits, weapons, upgrades and finished missions. Say yes to reset, or anything else to cancel.');
+            }
+
+            if (heard(command, ['help', 'commands'])) return baseHelp();
+
+            const weapon = findNamed(command, WEAPONS);
+            const upgrade = findNamed(command, UPGRADES);
+            const wantsToBuy = heard(command, ['buy', 'by', 'bye', 'bi', 'purchase', 'get', 'order', 'i want', 'i will take']);
+
+            if (heard(command, ['equip', 'carry', 'use', 'switch to', 'take the']) && weapon) return equipWeapon(weapon);
+            if (wantsToBuy && weapon) return buyItem(weapon, true);
+            if (wantsToBuy && upgrade) return buyItem(upgrade, false);
+            if (weapon) return describeItem(weapon, true);
+            if (upgrade) return describeItem(upgrade, false);
+
+            if (heard(command, ['weapons', 'weapon', 'guns', 'gun'])) return listWeapons();
+            if (heard(command, ['upgrades', 'upgrade'])) return listUpgrades();
+            if (heard(command, ['armory', 'armoury', 'shop', 'store'])) return armoryIntro();
+            if (heard(command, ['loadout', 'load out', 'gear', 'equipment', 'inventory'])) return describeLoadout();
+            if (heard(command, ['credits', 'credit', 'money'])) return say('You have ' + plural(profile.credits, 'credit', 'credits') + '.');
+            if (heard(command, ['status', 'career', 'progress'])) return careerStatus();
+
+            // A mission by name, or by number.
+            const named = findNamed(command, MISSIONS);
+            if (named) return startMission(MISSIONS.indexOf(named));
+            if (heard(command, ['mission', 'number']) || command.trim().split(' ').length === 1) {
+                const number = findNumber(command);
+                if (number >= 0 && number < MISSIONS.length) return startMission(number);
+            }
+            if (heard(command, ['missions', 'list'])) return listMissions();
+            if (heard(command, ['deploy', 'start', 'next', 'go', 'begin', 'ready', 'mission', 'play', 'retry', 'again'])) {
+                return startMission(nextMissionIndex());
+            }
+
+            say('I heard, ' + command.trim() + '. ' + BASE_PROMPT);
+        }
+
+        // ============================================================
+        // PART 7: RUNNING A MISSION
+        // Every mission has the same three steps: approach, entry, combat.
+        // ============================================================
+
+        const APPROACH_PROMPT = 'Say stealth to go in quiet, or breach to go in loud.';
+        const ALERTED_PROMPT = 'Say engage to fight, or retreat to fall back and try again.';
+        const ENTRY_PROMPT = 'Say push to go in fast, or tactical to go in careful.';
+
+        function startMission(index) {
+            if (!missionUnlocked(index)) {
+                return say([
+                    MISSIONS[index].name + ' is locked. Finish ' + MISSIONS[index - 1].name + ' first.',
+                    BASE_PROMPT
+                ]);
+            }
+            const mission = MISSIONS[index];
+            game.screen = 'mission';
+            game.stage = 'approach';
+            game.mission = mission;
+            game.combat = null;
+            game.player = {
+                maxHealth: 100 + (hasUpgrade('training') ? 25 : 0),
+                health: 100 + (hasUpgrade('training') ? 25 : 0),
+                ammo: magazineSize(),
+                grenades: hasUpgrade('grenades') ? 3 : 2,
+                medkits: hasUpgrade('medkits') ? 2 : 1,
+                stealthTries: 0,
+                wentQuiet: false,
+                tookDamage: false
+            };
+            profile.missionsRun++;
+            saveProfile();
+
+            const lines = mission.briefing.slice();
+            lines.push(remark('deploy'));
+            lines.push(mission.approach);
+            lines.push(APPROACH_PROMPT);
+            say(lines);
+        }
+
+        function stealthChance() {
+            const mission = game.mission;
+            let chance = mission.stealthChance + equippedWeapon().quiet;
+            if (hasUpgrade('suppressor')) chance += 0.15;
+            // Each failed try makes the guards more watchful.
+            chance -= 0.15 * game.player.stealthTries;
+            return Math.max(0.05, Math.min(0.95, chance));
         }
 
         function attemptStealth() {
-            game.mission.phase = 'stealth';
-            const success = Math.random() < 0.6;
-            
-            if (success) {
-                speakSequence([
-                    scenarios.stealthKill.success,
-                    'The compound is quieter now. Two sentries down.',
-                    'You approach the main building. The door is ajar.'
-                ], () => {
-                    game.mission.enemiesRemaining = 3;
-                    speakSequence([
-                        'You slip inside. Voices echo from deeper within.',
-                        'You can hear at least three hostiles.',
-                        'Do you want to breach or stay tactical?'
-                    ]);
-                    game.mission.phase = 'breach';
-                });
+            const mission = game.mission;
+            if (Math.random() < stealthChance()) {
+                game.player.wentQuiet = true;
+                game.stage = 'entry';
+                say([
+                    mission.stealthSuccess,
+                    remark('stealthWin'),
+                    mission.entry,
+                    ENTRY_PROMPT
+                ]);
             } else {
-                speakSequence([
-                    scenarios.stealthKill.failure,
-                    scenarios.stealthKill.choices
+                game.player.stealthTries++;
+                game.stage = 'alerted';
+                say([
+                    mission.stealthFailure,
+                    remark('stealthFail'),
+                    ALERTED_PROMPT
                 ]);
             }
         }
 
-        function startBreach() {
-            game.mission.phase = 'breach';
-            speakSequence([
-                scenarios.breach.description,
-                scenarios.breach.choices
-            ]);
+        function goLoud() {
+            const mission = game.mission;
+            game.stage = 'entry';
+            say([mission.breach, mission.entry, ENTRY_PROMPT]);
         }
 
-        function startCombat(enemyType, count) {
+        function handleApproachCommand(command) {
+            if (heard(command, ['stealth', 'quiet', 'quietly', 'silent', 'sneak', 'sentry', 'stealthy'])) return attemptStealth();
+            if (heard(command, ['breach', 'breech', 'loud', 'force', 'gate', 'kick', 'beach', 'bridge'])) return goLoud();
+            if (heard(command, ['look', 'observe', 'scan', 'listen', 'describe'])) return say([game.mission.approach, APPROACH_PROMPT]);
+            say('I heard, ' + command.trim() + '. ' + APPROACH_PROMPT);
+        }
+
+        function handleAlertedCommand(command) {
+            if (heard(command, ['engage', 'fire', 'shoot', 'attack', 'fight'])) {
+                // One lookout to deal with before the main fight.
+                return startCombat({ lookout: true, inCover: false, scrambling: false, intro: [] });
+            }
+            if (heard(command, ['retreat', 'fall back', 'back', 'cover', 'hide'])) {
+                game.stage = 'approach';
+                return say([
+                    'You melt back into the shadows. They search for a while, then settle. They will be more watchful now.',
+                    APPROACH_PROMPT
+                ]);
+            }
+            say('I heard, ' + command.trim() + '. ' + ALERTED_PROMPT);
+        }
+
+        function handleEntryCommand(command) {
+            const mission = game.mission;
+            if (heard(command, ['push', 'fast', 'aggressive', 'forward', 'charge', 'rush', 'bush'])) {
+                // Fast: you face everyone, in the open, but they lose their first turn.
+                return startCombat({ lookout: false, inCover: false, scrambling: true, fewer: 0, intro: [mission.push] });
+            }
+            if (heard(command, ['tactical', 'careful', 'carefully', 'slow', 'cover', 'practical', 'tactics'])) {
+                // Careful: you start in cover and catch one of them away from the fight.
+                return startCombat({ lookout: false, inCover: true, scrambling: false, fewer: 1, intro: [mission.tactical] });
+            }
+            if (heard(command, ['look', 'observe', 'scan', 'listen', 'describe'])) return say([mission.entry, ENTRY_PROMPT]);
+            say('I heard, ' + command.trim() + '. ' + ENTRY_PROMPT);
+        }
+
+        function finishMission(lines) {
+            const mission = game.mission;
+            const firstTime = !profile.completed[mission.id];
+            let pay = firstTime ? mission.reward : Math.floor(mission.reward / 2);
+
+            lines.push(mission.success);
+            lines.push('Mission complete.');
+            lines.push(remark('win'));
+            lines.push((firstTime ? 'Pay: ' : 'Replay pay: ') + pay + ' credits.');
+            if (game.player.wentQuiet) {
+                pay += 25;
+                lines.push('Stealth bonus: 25.');
+            }
+            if (!game.player.tookDamage) {
+                pay += 25;
+                lines.push('Untouched bonus: 25.');
+            }
+
+            profile.credits += pay;
+            profile.completed[mission.id] = true;
+            saveProfile();
+
+            lines.push('You now have ' + plural(profile.credits, 'credit', 'credits') + '.');
+            const index = MISSIONS.indexOf(mission);
+            if (firstTime && index + 1 < MISSIONS.length) {
+                lines.push('New mission unlocked: ' + MISSIONS[index + 1].name + '.');
+            } else if (firstTime) {
+                lines.push('That was the last mission. The campaign is complete. You can replay any mission for half pay.');
+            }
+            goToBase(lines);
+        }
+
+        function failMission(lines) {
+            lines.push('You go down. The radio chatter fades.');
+            lines.push('Mission failed.');
+            lines.push(remark('lose'));
+            lines.push('You keep your credits and your gear. Say deploy to try again.');
+            goToBase(lines);
+        }
+
+        function missionHelp() {
+            const lines = [];
+            if (game.stage === 'approach') lines.push(APPROACH_PROMPT);
+            else if (game.stage === 'alerted') lines.push(ALERTED_PROMPT);
+            else if (game.stage === 'entry') lines.push(ENTRY_PROMPT);
+            else lines.push('In a fight you can say: fire, cover, grenade, medkit, reload, or suppress.');
+            lines.push('Any time, say status, gear, repeat, or abort mission.');
+            say(lines);
+        }
+
+        function missionStatus() {
+            const player = game.player;
+            const lines = [
+                'Health ' + player.health + ' of ' + player.maxHealth + '.',
+                'Ammo ' + player.ammo + ' of ' + magazineSize() + '.',
+                plural(player.grenades, 'grenade', 'grenades') + '. ' + plural(player.medkits, 'medkit', 'medkits') + '.'
+            ];
+            if (game.stage === 'combat') {
+                const enemy = game.mission.enemy;
+                lines.push(plural(game.combat.alive, enemy.one, enemy.many) + ' left.');
+                lines.push(game.combat.inCover ? 'You are in cover.' : 'You are in the open.');
+            }
+            say(lines);
+        }
+
+        // ============================================================
+        // PART 8: COMBAT
+        // Each command is one full turn: your move, then theirs.
+        // ============================================================
+
+        const COMBAT_PROMPT = 'Your move. Fire, cover, grenade, medkit, reload, or suppress.';
+
+        function startCombat(options) {
+            const mission = game.mission;
+            const enemy = mission.enemy;
+            let count;
+            let waveIndex;
+
+            if (options.lookout) {
+                count = 1;
+                waveIndex = -1;                // the lookout comes before wave one
+            } else {
+                waveIndex = 0;
+                count = mission.waves[0] - (options.fewer || 0) - (game.player.wentQuiet ? 1 : 0);
+                if (count < 1) count = 1;
+            }
+
+            game.stage = 'combat';
             game.combat = {
-                enemyType: enemyType,
-                enemiesAlive: count,
-                playerInCover: game.player.inCover || false,
-                enemySuppressed: false,
-                turn: 1
+                wave: waveIndex,
+                alive: count,
+                inCover: !!options.inCover,
+                pinned: 0,
+                scrambling: !!options.scrambling
             };
 
-            speakSequence([
-                scenarios.combat.contact,
-                `${count} ${enemyType}${count > 1 ? 's' : ''} engaging!`,
-                'What are your orders? Fire, take cover, grenade, or use medkit.'
-            ]);
+            const lines = options.intro.slice();
+            lines.push('Contact! ' + plural(count, enemy.one, enemy.many) + '.');
+            if (options.inCover) lines.push('You are in cover.');
+            if (options.scrambling) lines.push('They are scrambling. You get the first move for free.');
+            lines.push(COMBAT_PROMPT);
+            say(lines);
         }
 
-        function handleCombatCommand(command) {
-            if (command.includes('fire') || command.includes('shoot') || command.includes('engage') || command.includes('attack')) {
-                fireWeapon();
-            } else if (command.includes('cover') || command.includes('duck') || command.includes('hide')) {
-                takeCover();
-            } else if (command.includes('grenade') || command.includes('throw') || command.includes('frag')) {
-                throwGrenade();
-            } else if (command.includes('medkit') || command.includes('heal') || command.includes('medical')) {
-                useMedkit();
-            } else if (command.includes('reload')) {
-                reloadWeapon();
-            } else if (command.includes('suppress') || command.includes('suppressive')) {
-                suppressiveFire();
-            } else {
-                speak('Say: fire, take cover, throw grenade, use medkit, reload, or suppress.');
+        // Their move. Adds what happens to the list of lines.
+        function enemyResponse(lines) {
+            const combat = game.combat;
+            const enemy = game.mission.enemy;
+            const player = game.player;
+
+            if (combat.scrambling) {
+                combat.scrambling = false;
+                lines.push('They are still scrambling for cover.');
+                return;
             }
+            if (combat.pinned > 0) {
+                combat.pinned--;
+                lines.push('They stay pinned down.');
+                return;
+            }
+
+            // When three or more of them are still up, two of them get a shot at you.
+            const shots = combat.alive >= 3 ? 2 : 1;
+            const hitChance = combat.inCover ? enemy.hitCover : enemy.hitOpen;
+            let damage = 0;
+            for (let shot = 0; shot < shots; shot++) {
+                if (Math.random() < hitChance) {
+                    damage += (combat.inCover ? enemy.damageCover : enemy.damageOpen) - (hasUpgrade('armor') ? 5 : 0);
+                }
+            }
+
+            if (damage > 0) {
+                player.health -= damage;
+                player.tookDamage = true;
+                if (player.health < 0) player.health = 0;
+                lines.push((combat.inCover ? 'Rounds punch through the edge of your cover.' : 'Rounds slam into your vest.') +
+                           ' You take ' + damage + ' damage. Health ' + player.health + '.');
+                if (player.health > 0) lines.push(remark('hurt'));
+            } else {
+                lines.push(combat.inCover ? 'Return fire hammers your cover. You are not hit.' : 'Bullets snap past your head. You are not hit.');
+            }
+        }
+
+        // Finishes a turn: checks the wave, lets them answer, checks your health.
+        function endTurn(lines, enemyActs) {
+            const combat = game.combat;
+            const mission = game.mission;
+            const enemy = mission.enemy;
+
+            if (combat.alive <= 0) {
+                // The lookout is down: on to the entry choice.
+                if (combat.wave < 0) {
+                    game.combat = null;
+                    game.stage = 'entry';
+                    lines.push('The lookout is down, but everyone heard that.');
+                    lines.push(mission.entry);
+                    lines.push(ENTRY_PROMPT);
+                    return say(lines);
+                }
+                // More waves to come?
+                if (combat.wave + 1 < mission.waves.length) {
+                    combat.wave++;
+                    combat.alive = mission.waves[combat.wave];
+                    combat.pinned = 0;
+                    combat.scrambling = false;
+                    lines.push(mission.waveLines[combat.wave - 1] || 'More of them are coming.');
+                    lines.push(plural(combat.alive, enemy.one, enemy.many) + '.');
+                    lines.push('Ammo ' + game.player.ammo + '. Health ' + game.player.health + '.');
+                    lines.push(COMBAT_PROMPT);
+                    return say(lines);
+                }
+                return finishMission(lines);
+            }
+
+            if (enemyActs) enemyResponse(lines);
+            if (game.player.health <= 0) return failMission(lines);
+
+            lines.push(COMBAT_PROMPT);
+            say(lines);
         }
 
         function fireWeapon() {
-            if (game.player.ammo < 3) {
-                speak('You need to reload. Say reload.');
-                return;
+            const weapon = equippedWeapon();
+            const combat = game.combat;
+            const enemy = game.mission.enemy;
+            const player = game.player;
+
+            if (player.ammo < weapon.burst) {
+                return say('Not enough rounds. Say reload.');
             }
+            player.ammo -= weapon.burst;
 
-            game.player.ammo -= 3;
-            const hitChance = game.combat.playerInCover ? 0.7 : 0.5;
-            const hit = Math.random() < hitChance;
+            let hitChance = combat.inCover ? weapon.hitCover : weapon.hitOpen;
+            if (hasUpgrade('optics')) hitChance += 0.10;
 
-            if (hit) {
-                game.combat.enemiesAlive--;
-                speakSequence([
-                    'Three round burst.',
-                    'Muzzle flash illuminates your target.',
-                    scenarios.combat.kill,
-                    `Ammo: ${game.player.ammo}.`,
-                    game.combat.enemiesAlive > 0 ? `${game.combat.enemiesAlive} hostile${game.combat.enemiesAlive > 1 ? 's' : ''} remaining.` : 'All hostiles down!'
-                ], () => {
-                    if (game.combat.enemiesAlive <= 0) {
-                        missionSuccess();
-                    } else {
-                        setTimeout(() => enemyTurn(), 1000);
-                    }
-                });
+            const lines = [];
+            if (Math.random() < hitChance) {
+                combat.alive--;
+                lines.push(weapon.fireLine + ' Hit. One ' + enemy.one + ' down. ' +
+                           (combat.alive > 0 ? plural(combat.alive, enemy.one, enemy.many) + ' left.' : 'That was the last of them.'));
+                lines.push(remark('kill'));
             } else {
-                speakSequence([
-                    'You fire.',
-                    'Rounds spark off concrete.',
-                    'Miss!',
-                    `Ammo: ${game.player.ammo}.`
-                ], () => {
-                    setTimeout(() => enemyTurn(), 1000);
-                });
+                lines.push(weapon.fireLine + ' Miss. ' + plural(combat.alive, enemy.one, enemy.many) + ' left.');
+                lines.push(remark('miss'));
             }
+            lines.push('Ammo ' + player.ammo + '.');
+            endTurn(lines, true);
         }
 
         function takeCover() {
-            if (game.combat.playerInCover) {
-                speak('You are already in cover. Fire, grenade, reload, or suppress?');
-                return;
+            if (game.combat.inCover) {
+                return say('You are already in cover. ' + COMBAT_PROMPT);
             }
-
-            game.combat.playerInCover = true;
-            speakSequence([
-                'You dive behind cover.',
-                'Concrete barrier shields you.',
-                'You have tactical advantage.'
-            ], () => {
-                setTimeout(() => enemyTurn(), 1000);
-            });
+            game.combat.inCover = true;
+            endTurn(['You dive behind cover. You are harder to hit, and your aim is steadier.'], true);
         }
 
         function throwGrenade() {
-            if (game.player.grenades <= 0) {
-                speak('No grenades remaining.');
-                return;
+            const mission = game.mission;
+            const combat = game.combat;
+            const enemy = mission.enemy;
+            const player = game.player;
+
+            if (mission.noGrenades && combat.wave >= 0) {
+                return say(mission.noGrenades + ' ' + COMBAT_PROMPT);
             }
+            if (player.grenades <= 0) {
+                return say('No grenades left. ' + COMBAT_PROMPT);
+            }
+            player.grenades--;
+            const killed = Math.min(combat.alive, Math.random() < 0.8 ? 2 : 1);
+            combat.alive -= killed;
 
-            game.player.grenades--;
-            const killed = Math.min(game.combat.enemiesAlive, Math.random() < 0.8 ? 2 : 1);
-            game.combat.enemiesAlive -= killed;
-
-            speakSequence([
-                'Grenade out!',
-                'You pull the pin and throw.',
-                'The explosion tears through the compound.',
-                'Shrapnel and debris fill the air.',
-                killed > 1 ? `${killed} hostiles eliminated!` : 'One hostile down!',
-                `Grenades remaining: ${game.player.grenades}.`,
-                game.combat.enemiesAlive > 0 ? `${game.combat.enemiesAlive} hostile${game.combat.enemiesAlive > 1 ? 's' : ''} still fighting.` : 'Area clear!'
-            ], () => {
-                if (game.combat.enemiesAlive <= 0) {
-                    missionSuccess();
-                } else {
-                    setTimeout(() => enemyTurn(), 1000);
-                }
-            });
+            const lines = [
+                'Grenade out! The blast shakes the ground. ' + plural(killed, enemy.one, enemy.many) + ' down. ' +
+                    (combat.alive > 0 ? plural(combat.alive, enemy.one, enemy.many) + ' left.' : 'That was the last of them.'),
+                remark('grenade'),
+                plural(player.grenades, 'grenade', 'grenades') + ' left.'
+            ];
+            endTurn(lines, true);
         }
 
         function useMedkit() {
-            if (game.player.medkits <= 0) {
-                speak('No medkits remaining.');
-                return;
+            const player = game.player;
+            if (player.medkits <= 0) {
+                return say('No medkits left. ' + COMBAT_PROMPT);
             }
-
-            if (game.player.health >= game.player.maxHealth) {
-                speak('You are not wounded. Save the medkit.');
-                return;
+            if (player.health >= player.maxHealth) {
+                return say('You are not wounded. Save the medkit. ' + COMBAT_PROMPT);
             }
-
-            game.player.medkits--;
-            const healing = Math.min(50, game.player.maxHealth - game.player.health);
-            game.player.health += healing;
-
-            speakSequence([
-                'You tear open the medkit.',
-                'Quick field dressing applied.',
-                `Health restored: ${game.player.health}.`,
-                `Medkits remaining: ${game.player.medkits}.`
-            ], () => {
-                setTimeout(() => enemyTurn(), 1000);
-            });
+            player.medkits--;
+            player.health = Math.min(player.maxHealth, player.health + 50);
+            endTurn(['You tear open the medkit and patch yourself up. Health ' + player.health + '. ' +
+                     plural(player.medkits, 'medkit', 'medkits') + ' left.'], true);
         }
 
         function reloadWeapon() {
-            if (game.player.ammo >= game.player.maxAmmo) {
-                speak('Magazine is full.');
-                return;
+            const player = game.player;
+            if (player.ammo >= magazineSize()) {
+                return say('Your magazine is full. ' + COMBAT_PROMPT);
             }
-
-            game.player.ammo = game.player.maxAmmo;
-            speakSequence([
-                scenarios.combat.reload,
-                `Ammo: ${game.player.ammo}.`,
-                'Weapon ready.'
-            ], () => {
-                setTimeout(() => enemyTurn(), 1000);
-            });
+            player.ammo = magazineSize();
+            endTurn(['You drop the empty magazine and slam a fresh one home. Ammo ' + player.ammo + '.'], true);
         }
 
         function suppressiveFire() {
-            if (game.player.ammo < 10) {
-                speak('Insufficient ammo for suppressive fire. Need 10 rounds.');
-                return;
+            const weapon = equippedWeapon();
+            const player = game.player;
+            if (!weapon.suppress) {
+                return say('The ' + weapon.name + ' cannot lay down suppressing fire. ' + COMBAT_PROMPT);
             }
-
-            game.player.ammo -= 10;
-            game.combat.enemySuppressed = true;
-
-            speakSequence([
-                'You lay down suppressive fire!',
-                'Rapid bursts keep their heads down.',
-                'Brass casings rain around you.',
-                'Enemies are pinned!',
-                `Ammo: ${game.player.ammo}.`
-            ], () => {
-                setTimeout(() => speak('What now? Fire, grenade, or reload?'), 500);
-            });
+            if (player.ammo < weapon.suppress) {
+                return say('Suppressing fire takes ' + weapon.suppress + ' rounds. You have ' + player.ammo + '. Say reload.');
+            }
+            player.ammo -= weapon.suppress;
+            game.combat.pinned = weapon.pinTurns;
+            game.combat.scrambling = false;
+            // They do not answer this turn, and they stay down for your next move too.
+            const lines = ['You lay down suppressing fire. Brass rains around your boots. They are pinned. Ammo ' + player.ammo + '.'];
+            lines.push(weapon.pinTurns > 1 ? 'Your next ' + weapon.pinTurns + ' moves are free.' : 'Your next move is free.');
+            endTurn(lines, false);
         }
 
-        function enemyTurn() {
-            if (game.combat.enemySuppressed) {
-                game.combat.enemySuppressed = false;
-                speak('Enemies remain pinned. Your turn.');
-                return;
+        function handleCombatCommand(command) {
+            if (heard(command, ['fire', 'shoot', 'shot', 'engage', 'attack', 'fired'])) return fireWeapon();
+            if (heard(command, ['cover', 'duck', 'hide', 'take cover', 'covers'])) return takeCover();
+            if (heard(command, ['grenade', 'grenades', 'throw', 'frag'])) return throwGrenade();
+            if (heard(command, ['medkit', 'med kit', 'heal', 'medical', 'medic', 'med'])) return useMedkit();
+            if (heard(command, ['reload', 're load', 'reloads'])) return reloadWeapon();
+            if (heard(command, ['suppress', 'suppressive', 'suppressing', 'suppression', 'pin'])) return suppressiveFire();
+            say('I heard, ' + command.trim() + '. ' + COMBAT_PROMPT);
+        }
+
+        // ============================================================
+        // PART 9: COMMAND ROUTER AND STARTUP
+        // ============================================================
+
+        function processCommand(spoken) {
+            const command = plain(spoken);
+
+            // Commands that work everywhere.
+            if (heard(command, ['repeat', 'say again', 'say that again', 'again please', 'come again'])) {
+                return say(game.lastReport.length ? game.lastReport : BASE_PROMPT);
+            }
+            if (heard(command, ['overwatch off', 'narrator off', 'remarks off', 'radio off', 'overwatch of', 'narrator of'])) {
+                profile.overwatch = false;
+                saveProfile();
+                return say('Overwatch remarks are off. Say overwatch on to bring them back.');
+            }
+            if (heard(command, ['overwatch on', 'narrator on', 'remarks on', 'radio on'])) {
+                profile.overwatch = true;
+                saveProfile();
+                return say('Overwatch remarks are on. You missed me. Admit it.');
             }
 
-            const hitChance = game.combat.playerInCover ? 0.3 : 0.6;
-            const hit = Math.random() < hitChance;
-
-            if (hit) {
-                const damage = game.combat.playerInCover ? 15 : 25;
-                game.player.health -= damage;
-
-                const messages = [
-                    scenarios.combat.suppressed,
-                    scenarios.combat.hit,
-                    `You take ${damage} damage!`,
-                    `Health: ${game.player.health}.`
-                ];
-
-                if (game.player.health <= 0) {
-                    speakSequence(messages, () => {
-                        setTimeout(() => missionFailed(), 1000);
-                    });
-                } else {
-                    speakSequence(messages, () => {
-                        setTimeout(() => speak('Your turn. Fire, cover, grenade, or medkit?'), 500);
-                    });
+            if (game.screen === 'mission') {
+                if (heard(command, ['abort mission', 'abort', 'quit mission', 'give up'])) {
+                    return goToBase(['Mission aborted. You keep your credits and your gear.']);
                 }
-            } else {
-                speakSequence([
-                    'Enemy fire erupts!',
-                    game.combat.playerInCover ? 'Rounds impact your cover!' : 'Bullets snap past your head!',
-                    'You are still in the fight!',
-                    'What are your orders?'
-                ]);
-            }
-        }
+                if (heard(command, ['help', 'commands'])) return missionHelp();
+                if (heard(command, ['status', 'check', 'health'])) return missionStatus();
+                if (heard(command, ['gear', 'equipment', 'inventory', 'loadout'])) return missionStatus();
 
-        function missionSuccess() {
-            game.phase = 'complete';
-            game.combat = null;
-            speakSequence([
-                'Last hostile neutralized.',
-                'The compound falls silent.',
-                'You scan for threats. Clear.',
-                'Mission complete.',
-                `Final status: Health ${game.player.health}. Ammo ${game.player.ammo}.`,
-                'Exfil en route. Well done, operator.'
-            ]);
-        }
-
-        function missionFailed() {
-            game.phase = 'failed';
-            game.combat = null;
-            speakSequence([
-                'You fall.',
-                'Your vision blurs.',
-                'Radio chatter fades.',
-                'Mission failed.',
-                'Operator down.'
-            ]);
-        }
-
-        function checkStatus() {
-            const messages = [
-                `Health: ${game.player.health} of ${game.player.maxHealth}.`,
-                `Ammo: ${game.player.ammo} rounds.`,
-                `Grenades: ${game.player.grenades}.`,
-                `Medkits: ${game.player.medkits}.`
-            ];
-
-            if (game.phase === 'combat') {
-                messages.push(`Hostiles remaining: ${game.combat.enemiesAlive}.`);
-                messages.push(game.combat.playerInCover ? 'You are in cover.' : 'You are exposed.');
+                if (game.stage === 'combat') return handleCombatCommand(command);
+                if (game.stage === 'approach') return handleApproachCommand(command);
+                if (game.stage === 'alerted') return handleAlertedCommand(command);
+                if (game.stage === 'entry') return handleEntryCommand(command);
             }
 
-            speakSequence(messages);
+            handleBaseCommand(command);
         }
 
-        function checkGear() {
-            speakSequence([
-                'Gear check:',
-                'M4 carbine with thirty round magazine.',
-                `Current ammo: ${game.player.ammo}.`,
-                `Fragmentation grenades: ${game.player.grenades}.`,
-                `Field medical kits: ${game.player.medkits}.`,
-                'Body armor equipped.',
-                'Night vision capable.'
-            ]);
+        function handleClick() {
+            if (!game.started) {
+                // The first tap starts the game. Browsers keep a page silent
+                // until it has been touched.
+                game.started = true;
+                micButton.classList.remove('start-button');
+                baseWelcome();
+                return;
+            }
+            startListening();
         }
 
         micButton.addEventListener('click', handleClick);
         micButton.addEventListener('contextmenu', (e) => e.preventDefault());
 
-        document.addEventListener('DOMContentLoaded', () => {
-            checkBrowserSupport();
-            setTimeout(() => {
-                const status = `HTTPS: ${browserSupport.https}. Speech: ${browserSupport.speechSynthesis}. Recognition: ${browserSupport.speechRecognition}.`;
-                console.log(status);
-                speak('Echo: Tactical Ops is ready. Tap the screen to begin your mission.');
-            }, 1000);
-        });
+        checkBrowserSupport();
+        loadProfile();
+        displayText('Echo Tactical Ops. Tap the screen to begin.');
     </script>
 </body>
 </html>

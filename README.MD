@@ -59,6 +59,9 @@ Every mission is played the same way, so there is nothing new to learn each time
 ### Overwatch
 Overwatch is your handler on the radio, and has opinions. Say "overwatch off" to silence the remarks and "overwatch on" to bring them back.
 
+### AI Narrator (optional)
+Say "narrator on" and a small language model on your own device writes a fresh line about each mission site, in Overwatch's voice. It needs a one-time download of about 270 MB. The download and the on/off choice are shared with the other Echo games, so if you already turned the narrator on in Echo Dungeon, it is already here. Say "narrator off" to stop it and "narrator status" to check on it.
+
 ## Weapons
 - Carbine - balanced, and free
 - Submachine gun - quiet, good for stealth

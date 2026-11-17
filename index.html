@@ -47,6 +47,11 @@
     <div id="textDisplay" role="status" aria-live="polite"></div>
     <button id="micButton" class="start-button" aria-label="Voice command button - Tap to speak"></button>
 
+    <!-- The shared AI narrator core. The same file is in every Echo game.
+         The game works without it: if this line is removed or the file is
+         missing, only the "narrator on" feature goes away. -->
+    <script src="echo-narrator-core.js"></script>
+
     <script>
         // ============================================================
         // ECHO: TACTICAL OPS - CAMPAIGN EDITION
@@ -68,6 +73,7 @@
         //  PART 7  Running a mission
         //  PART 8  Combat
         //  PART 9  Command router and startup
+        //  PART 10 Shared AI narrator (optional)
         // ============================================================
 
         // ============================================================
@@ -176,9 +182,11 @@
         // enemy          hitOpen / hitCover: their chance to hit you
         //                damageOpen / damageCover: how hard they hit
         // noGrenades     set to a sentence to forbid grenades, and say why
+        // site           a few words naming the place, for the AI narrator
         const MISSIONS = [
             {
                 id: 'compound', name: 'Compound Breach', reward: 100,
+                site: 'a hill compound at night',
                 hears: ['compound breach', 'compound'],
                 briefing: [
                     'Mission one. Compound Breach.',
@@ -199,6 +207,7 @@
             },
             {
                 id: 'convoy', name: 'Night Convoy', reward: 150,
+                site: 'a windy mountain road at night',
                 hears: ['night convoy', 'convoy'],
                 briefing: [
                     'Mission two. Night Convoy.',
@@ -219,6 +228,7 @@
             },
             {
                 id: 'hostage', name: 'Hostage Rescue', reward: 200,
+                site: 'a dark apartment stairwell',
                 hears: ['hostage rescue', 'hostage', 'hostages', 'rescue'],
                 briefing: [
                     'Mission three. Hostage Rescue.',
@@ -241,6 +251,7 @@
             },
             {
                 id: 'harbor', name: 'Harbor Raid', reward: 275,
+                site: 'a rainy container dock at night',
                 hears: ['harbor raid', 'harbour raid', 'harbor', 'harbour', 'raid'],
                 briefing: [
                     'Mission four. Harbor Raid.',
@@ -262,6 +273,7 @@
             },
             {
                 id: 'stronghold', name: 'Mountain Stronghold', reward: 400,
+                site: 'a snowy mountain bunker',
                 hears: ['mountain stronghold', 'stronghold', 'mountain', 'strong hold'],
                 briefing: [
                     'Mission five. Mountain Stronghold.',
@@ -658,8 +670,11 @@
             game.combat = null;
             game.player = null;
             const list = (lines || []).slice();
+            const notice = narratorNotice();
+            if (notice) list.unshift(notice);
             list.push(BASE_PROMPT);
             say(list);
+            prepareSiteLines();
         }
 
         function baseWelcome() {
@@ -792,6 +807,7 @@
                 'Loadout, to hear what you carry.',
                 'Repeat, to hear the last thing again.',
                 'Overwatch off, or overwatch on, for the radio remarks.',
+                'Narrator on, to let Overwatch describe each mission site in fresh words. That needs a one time download, shared by all Echo games.',
                 'Reset career, to start over from nothing.'
             ]);
         }
@@ -881,8 +897,11 @@
             saveProfile();
 
             const lines = mission.briefing.slice();
+            const notice = narratorNotice();
+            if (notice) lines.unshift(notice);
             lines.push(remark('deploy'));
             lines.push(mission.approach);
+            lines.push(takeSiteLine(mission));
             lines.push(APPROACH_PROMPT);
             say(lines);
         }
@@ -1254,22 +1273,113 @@
         }
 
         // ============================================================
+        // PART 10: SHARED AI NARRATOR (optional)
+        // With "narrator on", a small language model on the player's
+        // own device writes one fresh line about each mission site,
+        // in Overwatch's voice. It is written ahead of time, so nobody
+        // waits for it. Overwatch's other remarks (Part 3) are written
+        // by hand and do not need the model.
+        //
+        // The model and the "narrator on" choice are shared with the
+        // other Echo games. The loading and the voice commands live in
+        // echo-narrator-core.js. If that file is missing, everything
+        // here quietly does nothing.
+        // ============================================================
+
+        const narratorCore = window.EchoNarratorCore || null;
+        const siteLines = {};        // mission id -> a line the model wrote, waiting to be used
+        const siteTries = {};        // mission id -> how many answers were thrown away
+        const sitePending = {};      // mission id -> true while the model is working on it
+
+        const SITE_PROMPT =
+            'You are Overwatch, a dry, teasing radio handler in an audio tactical game, secretly fond of the operator. ' +
+            'For each place, reply with exactly one short sentence about what is heard, smelled or felt there, with a wry remark. ' +
+            'Never mention directions, people, or what happens next.';
+
+        const SITE_EXAMPLES = [
+            ['Place: a desert airstrip at dawn. Mood: still.',
+             'Hot tar and jet fuel on the air, and a windsock flapping like it has somewhere better to be.'],
+            ['Place: a flooded tunnel. Mood: cold.',
+             'Water drips somewhere in the dark and it smells like old socks, so breathe through your mouth.'],
+            ['Place: a jungle river camp. Mood: humid.',
+             'Frogs, mud and wood smoke, and the mosquitoes sound absolutely delighted to meet you.']
+        ];
+
+        const SITE_MOODS = ['still', 'cold', 'tense', 'quiet', 'windy', 'damp', 'restless'];
+
+        // Words that could give false information about the mission, plus signs the model went off script.
+        const SITE_BLOCKED = /\b(north|south|east|west|left|right|ahead|behind|guards?|sentry|sentries|enem(y|ies)|hostiles?|soldiers?|men|man|hostages?|kidnappers?|smugglers?|sorry|cannot|assistant|sentence)\b/i;
+
+        if (narratorCore) {
+            narratorCore.init({
+                say: function (text) { say(text); },
+                onReady: function () { prepareSiteLines(); },
+                linesNoun: 'lines'
+            });
+        }
+
+        // The "narrator is awake" or "could not load" notice, once.
+        function narratorNotice() {
+            return narratorCore ? narratorCore.takeNotice() : '';
+        }
+
+        // Asks the model for a line about every mission that is open and has none waiting.
+        function prepareSiteLines() {
+            if (!narratorCore || narratorCore.narrator.state !== 'ready') return;
+            // If the model is idle, nothing is really being worked on (the narrator may have been off and on again).
+            if (!narratorCore.narrator.busy && narratorCore.narrator.queue.length === 0) {
+                for (const id in sitePending) sitePending[id] = false;
+            }
+            MISSIONS.forEach((mission, index) => {
+                if (!missionUnlocked(index) || siteLines[mission.id] || sitePending[mission.id] || (siteTries[mission.id] || 0) >= 3) return;
+                sitePending[mission.id] = true;
+                const mood = SITE_MOODS[Math.floor(Math.random() * SITE_MOODS.length)];
+                narratorCore.enqueue({
+                    messages: narratorCore.buildMessages(SITE_PROMPT, SITE_EXAMPLES, 'Place: ' + mission.site + '. Mood: ' + mood + '.'),
+                    clean: function (raw) { return narratorCore.cleanSentence(raw, SITE_BLOCKED); },
+                    onText: function (text) { sitePending[mission.id] = false; if (!siteLines[mission.id]) siteLines[mission.id] = text; },
+                    onNothing: function () { sitePending[mission.id] = false; siteTries[mission.id] = (siteTries[mission.id] || 0) + 1; }
+                });
+            });
+        }
+
+        // Uses up the waiting line for this mission, if there is one, so a replay gets a new one.
+        function takeSiteLine(mission) {
+            if (!narratorCore || !narratorCore.narrator.enabled || !profile.overwatch) return '';
+            const line = siteLines[mission.id];
+            if (!line) return '';
+            delete siteLines[mission.id];
+            siteTries[mission.id] = 0;
+            return 'Overwatch. ' + line;
+        }
+
+        // ============================================================
         // PART 9: COMMAND ROUTER AND STARTUP
         // ============================================================
 
         function processCommand(spoken) {
             const command = plain(spoken);
 
+            // The shared AI narrator: narrator on, narrator off, narrator status.
+            if (narratorCore) {
+                narratorCore.bootCheck();
+                if (narratorCore.isCommand(command)) {
+                    narratorCore.handleCommand(command);
+                    return;
+                }
+                prepareSiteLines();
+            }
+
             // Commands that work everywhere.
             if (heard(command, ['repeat', 'say again', 'say that again', 'again please', 'come again'])) {
                 return say(game.lastReport.length ? game.lastReport : BASE_PROMPT);
             }
-            if (heard(command, ['overwatch off', 'narrator off', 'remarks off', 'radio off', 'overwatch of', 'narrator of'])) {
+            if (heard(command, ['overwatch off', 'remarks off', 'radio off', 'overwatch of'])) {
                 profile.overwatch = false;
                 saveProfile();
                 return say('Overwatch remarks are off. Say overwatch on to bring them back.');
             }
-            if (heard(command, ['overwatch on', 'narrator on', 'remarks on', 'radio on'])) {
+            if (heard(command, ['overwatch on', 'remarks on', 'radio on'])) {
                 profile.overwatch = true;
                 saveProfile();
                 return say('Overwatch remarks are on. You missed me. Admit it.');
